@@ -1,0 +1,15 @@
+app/node_modules
+app/dist
+cache/npm/*
+cache/remotion/*
+storage/output/*
+storage/assets/*
+!cache/npm/.gitkeep
+!cache/remotion/.gitkeep
+!storage/output/.gitkeep
+!storage/assets/.gitkeep
+template-src
+template-src-git-backup
+package
+create-video-*.tgz
+scaffold-test

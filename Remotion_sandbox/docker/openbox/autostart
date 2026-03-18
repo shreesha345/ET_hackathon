@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+
+pcmanfm /workspace/app &
+xterm -fa Monospace -fs 11 -geometry 140x40+24+24 -T "Remotion Sandbox" -e bash -lc "cd /workspace/app && exec bash" &

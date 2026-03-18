@@ -1,0 +1,9 @@
+app/node_modules
+app/dist
+cache
+storage/output
+template-src
+template-src-git-backup
+package
+create-video-*.tgz
+scaffold-test

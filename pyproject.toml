@@ -4,4 +4,13 @@ version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "fastmcp>=3.1.1",
+    "google-cloud-aiplatform>=1.141.0",
+    "google-genai>=1.68.0",
+    "langchain>=0.3.0",
+    "langchain-anthropic>=0.3.0",
+    "langchain-google-vertexai>=3.2.2",
+    "pillow>=12.1.1",
+    "python-dotenv>=1.0.1",
+]

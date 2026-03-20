@@ -1,54 +1,127 @@
+"""
+memory.py — Scratchpad for the Agent
+=====================================
+This acts as the agent's notepad. Every action the agent takes is logged here
+as a "step" so the agent can look back and understand:
+  - What has been done so far
+  - Whether each step succeeded or failed
+  - What to do next
+
+Steps are saved to a JSON file on disk so they survive restarts.
+Think of it like a to-do list that the agent writes for itself.
+"""
+
 import json
 import os
+from datetime import datetime
+
 
 class Memory:
     """
-    A simple memory/scratchpad for the agent to track its steps and status.
+    A simple scratchpad that stores steps as a list of dicts.
+
+    Each step looks like:
+        {
+            "id": 1,
+            "description": "Loading skill: math_agent",
+            "status": "success",          # pending | in_progress | success | error | done
+            "timestamp": "2026-03-20 20:30:00"
+        }
     """
+
     def __init__(self, storage_file="memory.json"):
+        """
+        Args:
+            storage_file: Path to the JSON file where steps are saved.
+        """
         self.storage_file = storage_file
         self.steps = []
-        self.load_memory()
+        self._load()  # Load any existing steps from disk
 
-    def add_step(self, step_description, status="pending"):
-        """Adds a new step to the memory."""
+    # ── Add / Update Steps ────────────────────────────────────────────────────
+
+    def add_step(self, description: str, status: str = "pending") -> int:
+        """
+        Record a new step in the scratchpad.
+
+        Args:
+            description: What this step is about (e.g. "Loading skill: math_agent")
+            status:      Current status — one of: pending, in_progress, success, error, done
+
+        Returns:
+            The ID of the newly created step.
+        """
         step = {
             "id": len(self.steps) + 1,
-            "description": step_description,
-            "status": status
+            "description": description,
+            "status": status,
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
         self.steps.append(step)
-        self.save_memory()
+        self._save()
         return step["id"]
 
-    def update_step_status(self, step_id, status):
-        """Updates the status of an existing step."""
+    def update_step(self, step_id: int, status: str) -> bool:
+        """
+        Update the status of an existing step.
+
+        Args:
+            step_id: The ID of the step to update.
+            status:  New status string.
+
+        Returns:
+            True if the step was found and updated, False otherwise.
+        """
         for step in self.steps:
             if step["id"] == step_id:
                 step["status"] = status
-                self.save_memory()
+                self._save()
                 return True
         return False
 
-    def get_all_steps(self):
-        """Returns all steps recorded so far."""
+    # ── Read Steps ────────────────────────────────────────────────────────────
+
+    def get_all_steps(self) -> list:
+        """Return the full list of steps."""
         return self.steps
 
-    def clear_memory(self):
-        """Clears all steps from memory."""
-        self.steps = []
-        self.save_memory()
+    def get_last_step(self) -> dict | None:
+        """Return the most recent step, or None if there are no steps."""
+        return self.steps[-1] if self.steps else None
 
-    def save_memory(self):
-        """Saves memory to a JSON file."""
+    def get_summary(self) -> str:
+        """
+        Return a human-readable summary of all steps.
+        Useful for injecting into the agent's context so it knows what happened.
+        """
+        if not self.steps:
+            return "No activity recorded yet."
+
+        lines = []
+        for s in self.steps:
+            icon = "✓" if s["status"] in ("success", "done") else "✗" if s["status"] == "error" else "…"
+            lines.append(f"  {icon} [{s['id']}] {s['description']}  →  {s['status']}")
+        return "\n".join(lines)
+
+    # ── Clear ─────────────────────────────────────────────────────────────────
+
+    def clear(self):
+        """Wipe all steps (fresh start)."""
+        self.steps = []
+        self._save()
+
+    # ── Persistence (private) ─────────────────────────────────────────────────
+
+    def _save(self):
+        """Write steps to disk as JSON."""
         with open(self.storage_file, "w") as f:
             json.dump(self.steps, f, indent=4)
 
-    def load_memory(self):
-        """Loads memory from a JSON file if it exists."""
+    def _load(self):
+        """Read steps from disk if the file exists."""
         if os.path.exists(self.storage_file):
             try:
                 with open(self.storage_file, "r") as f:
                     self.steps = json.load(f)
-            except json.JSONDecodeError:
+            except (json.JSONDecodeError, IOError):
                 self.steps = []

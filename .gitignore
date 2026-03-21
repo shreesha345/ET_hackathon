@@ -10,3 +10,8 @@ wheels/
 .venv
 memory.json
 .env
+
+generated_videos
+generated_frames
+script.json
+Images

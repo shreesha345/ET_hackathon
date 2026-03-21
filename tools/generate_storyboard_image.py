@@ -119,15 +119,48 @@ def build_prompt(subject_description: str, text_overlay: str,
                                  and {text_section} placeholders.
         text_section_template  — the snippet inserted when text_overlay is
                                  provided (contains {text_overlay}).
-
-    If those keys are missing we fall back to a generic prompt construction
-    using the style's metadata.
     """
+    # ── Feature Augmentation (Dynamic Keywords) ──────────────────────────────
+    # If the description contains people or faces, we add quality-of-life tokens
+    # for better character rendering in the Vox style.
+    character_keywords = ["person", "man", "woman", "child", "celebrity", "portrait", "face", "standing", "sitting"]
+    is_character = any(kw in subject_description.lower() for kw in character_keywords)
+    
+    # ── Logo & Brand Detection (Safety / Quality Check) ──────────────────────
+    brand_keywords = ["logo", "brand", "trademark", "apple logo", "nike logo", "google logo", "icon of", "emblem", "symbol of"]
+    is_brand_requested = any(kw in subject_description.lower() for kw in brand_keywords)
+    
+    logo_safety_instruction = ""
+    if is_brand_requested:
+        # If the user asks for a logo, prioritize rendering the name as text if the logo is complex
+        brand_name = subject_description.split("logo")[0].strip() if "logo" in subject_description.lower() else subject_description
+        logo_safety_instruction = (
+            f" If an accurate logo for {brand_name} cannot be rendered, instead render the brand name '{brand_name}' "
+            f"using stylized, high-quality typography matching the aesthetic. Avoid messy or distorted trademark symbols."
+        )
+
+    enhanced_subject = subject_description
+    if is_character and "vox" in style.get("name", "").lower():
+        # Add cinematic lighting and high-detail facial features for characters
+        enhanced_subject += ", highly detailed facial features, expressive eyes, realistic skin texture, cinematic lighting"
+
     # ── Fill in the structural JSON spec ─────────────────────────────────────
     style_spec = copy.deepcopy(style)
+    
+    # Include logo guidelines in the spec if available
+    logo_guidelines = style_spec.get("logo_guidelines", "")
+    if logo_guidelines:
+        enhanced_subject += f". Logo Guideline: {logo_guidelines}"
+
+    # Search for subject field in various common structures
     if "image_style" in style_spec:
+        # Check standard main_photo structure
         if "main_photo" in style_spec["image_style"]:
-            style_spec["image_style"]["main_photo"]["subject"] = subject_description
+             style_spec["image_style"]["main_photo"]["subject"] = enhanced_subject + logo_safety_instruction
+        # Support alternative "main_subject" key if used
+        elif "main_subject" in style_spec["image_style"]:
+            style_spec["image_style"]["main_subject"]["subject"] = enhanced_subject + logo_safety_instruction
+            
         if "typography" in style_spec["image_style"]:
             style_spec["image_style"]["typography"]["text_content"] = text_overlay or ""
 
@@ -142,7 +175,7 @@ def build_prompt(subject_description: str, text_overlay: str,
             text_section = text_tpl.format(text_overlay=text_overlay)
 
         ai_prompt = prompt_tpl.format(
-            subject=subject_description,
+            subject=enhanced_subject,
             text_section=text_section,
         )
     else:
@@ -150,7 +183,7 @@ def build_prompt(subject_description: str, text_overlay: str,
         style_name = style.get("name", "artistic")
         ai_prompt = (
             f"9:16 portrait canvas 1080x1920px, {style_name} style, "
-            f"depicting {subject_description}. "
+            f"depicting {enhanced_subject}. "
         )
         if text_overlay:
             ai_prompt += f"Include visible text reading '{text_overlay}'. "
@@ -203,7 +236,6 @@ def generate_image(description: str, text_overlay: str = "",
 
     # ── Initialize the GenAI client (Vertex AI mode) ─────────────────────────
     client = genai.Client(
-        vertexai=True,
         api_key=os.getenv("VITE_VERTEX_API_KEY"),
     )
 

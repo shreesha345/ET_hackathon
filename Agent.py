@@ -248,7 +248,6 @@ class Agent:
 
         # Initialize the Google GenAI client
         self.client = genai.Client(
-            vertexai=True,
             api_key=os.getenv("VITE_VERTEX_API_KEY"),
         )
         self._log("System", f"Agent initialized with {self.MODEL_ID}.", Colors.GREEN)
@@ -490,11 +489,10 @@ class Agent:
             response = self.chat.send_message(user_message)
 
         # ── Tool Call Loop ────────────────────────────────────────────────────
-        # The LLM might want to call tools. We keep looping until it gives text.
-        while (
-            response.candidates[0].content.parts
-            and any(p.function_call for p in response.candidates[0].content.parts)
-        ):
+        while response.candidates[0].content.parts and any(p.function_call for p in response.candidates[0].content.parts):
+            function_responses = []
+            immediate_return = None
+
             for part in response.candidates[0].content.parts:
                 if not part.function_call:
                     continue
@@ -506,31 +504,28 @@ class Agent:
                 # ── Handle: list_skills ────────────────────────────────────────
                 if fn_name == "list_skills":
                     result = self._list_skills()
-                    response = self.chat.send_message([
-                        types.Part.from_function_response(
-                            name=fn_name, response={"skills": result}
-                        )
-                    ])
+                    function_responses.append(
+                        types.Part.from_function_response(name=fn_name, response={"skills": result})
+                    )
 
                 # ── Handle: find_and_use_skill (load & switch to specialist) ──
                 elif fn_name == "find_and_use_skill":
                     skill_name = fn_args.get("skill_name", "")
                     self.find_and_use_skill(skill_name)
-                    return self.run(
+                    # This switches modes — we must restart the 'run' with the original query
+                    immediate_return = self.run(
                         f"User's original request: '{user_message}'. "
                         f"Please complete this and call reset_to_manager when done."
                     )
+                    break
 
                 # ── Handle: run_skill (run a skill without switching modes) ──
                 elif fn_name == "run_skill":
                     skill_result = self._run_tool_script("run_skill", fn_args)
                     self._log("Skill Result", f"{fn_args.get('skill_name', '?')} → done", Colors.GREEN)
-                    with Spinner("Processing result..."):
-                        response = self.chat.send_message([
-                            types.Part.from_function_response(
-                                name=fn_name, response=skill_result
-                            )
-                        ])
+                    function_responses.append(
+                        types.Part.from_function_response(name=fn_name, response=skill_result)
+                    )
 
                 # ── Handle: reset_to_manager (KILL SWITCH) ────────────────────
                 elif fn_name == "reset_to_manager":
@@ -538,23 +533,28 @@ class Agent:
                         fn_args.get("work_summary", ""),
                         fn_args.get("next_steps", ""),
                     )
-                    # Manager resumes — check if there are next steps to handle
-                    return self.run(
+                    # This switches back to manager — restart with context
+                    immediate_return = self.run(
                         f"Specialist finished. {result}. "
                         f"Check memory for any next steps."
                     )
+                    break
 
                 # ── Handle: Any other tool (from a loaded skill) ──────────────
                 else:
                     tool_result = self._run_tool_script(fn_name, fn_args)
-                    with Spinner("Processing result..."):
-                        response = self.chat.send_message([
-                            types.Part.from_function_response(
-                                name=fn_name, response=tool_result
-                            )
-                        ])
+                    function_responses.append(
+                        types.Part.from_function_response(name=fn_name, response=tool_result)
+                    )
 
-                break  # Re-check the while loop after each tool call
+            if immediate_return:
+                return immediate_return
+
+            if function_responses:
+                with Spinner("Processing results..."):
+                    response = self.chat.send_message(function_responses)
+            else:
+                break
 
         # ── Done — return the LLM's text response ────────────────────────────
         return response.text or "[No response]"

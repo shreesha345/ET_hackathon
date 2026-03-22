@@ -118,21 +118,27 @@ def _load_manager_prompt() -> str:
             return content
 
     # Fallback default prompt (used only if prompt.md is empty/missing)
-    return """You are the Main Agent Manager.
+    return """You are the Main Agent Manager. Your job is to oversee the complete video production pipeline.
 
-Your job:
-1. Understand the user's request.
-2. Use 'find_and_use_skill' to search for and load the right specialist skill.
-3. When a specialist finishes, it calls 'reset_to_manager' with a summary.
-4. Check your memory for any pending next_steps and act on them.
-5. When everything is done, present the final result to the user."""
+### VIDEO GENERATION WORKFLOW (ORDER OF OPERATIONS):
+1. **Scripting**: Use `scriptwriter_agent` to create `script.json`.
+2. **Storyboarding**: Use `storyboard_artist` to generate frames in `generated_frames/`.
+3. **Voiceover**: Use `voiceover_agent` to generate audio. 
+   - **IMPORTANT**: Record the **durations** of the generated audio files for the next step.
+4. **Motion Design**: Use `motion_designer_agent` with the saved frames and **audio durations**.
+   - Set `duration_seconds` to match the audio for each scene.
+5. **Final Assembly**: Use `video_editor_agent` to merge and compile the final `output.mp4`.
+
+Always check your memory for next steps and durations before proceeding to the next phase."""
 
 
 # This instruction is appended to EVERY specialist's prompt so they know to hand back.
 REPORTING_INSTRUCTION = """
 
 IMPORTANT: When you finish your job, you MUST call 'reset_to_manager'.
-Provide a clear 'work_summary' and list any 'next_steps' if more work is needed."""
+Provide a clear 'work_summary' and list any 'next_steps' or 'durations' discovered during your task."""
+
+
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -192,11 +198,9 @@ MANAGER_TOOLS = [
         },
     },
     {
-        # Kill switch — specialist calls this when done.
+        # Return control to manager.
         "name": "reset_to_manager",
-        "description": (
-            "Return control to the main manager. Call this when your job is done."
-        ),
+        "description": "Return control to the main manager. Call this when your job is done.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -212,7 +216,28 @@ MANAGER_TOOLS = [
             "required": ["work_summary"],
         },
     },
+    {
+        "name": "load_script",
+        "description": "Utility: Load the video script JSON from script.json.",
+        "parameters": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "list_videos",
+        "description": "Utility: List all produced video clips in the generated_videos/ directory.",
+        "parameters": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "list_frames",
+        "description": "Utility: List all storyboard frames in the generated_frames/ directory.",
+        "parameters": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "list_audio",
+        "description": "Utility: List all voiceover audio files in the generated_audio/ directory.",
+        "parameters": {"type": "object", "properties": {}},
+    },
 ]
+
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -443,11 +468,17 @@ class Agent:
         """
         Build the complete list of tools available to the LLM.
         Always includes MANAGER_TOOLS + any tools from the loaded skill.
+        Deduplicates tools by name to avoid 'Duplicate function declaration' errors.
         """
-        all_tools = MANAGER_TOOLS + self.current_tools
+        # Deduplicate tools by name (skill-specific tools override global ones if names clash)
+        seen_tools = {}
+        for t in (MANAGER_TOOLS + self.current_tools):
+            if "name" in t:
+                seen_tools[t["name"]] = t
+            
         return [
             types.Tool(function_declarations=[types.FunctionDeclaration(**t)])
-            for t in all_tools
+            for t in seen_tools.values()
         ]
 
     def _ensure_chat(self):

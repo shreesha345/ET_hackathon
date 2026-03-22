@@ -21,14 +21,11 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ── Auth: API Key ─────────────────────────────────────────────────────────────
-# Uses the key that successfully worked for the user's manual test
-API_KEY = os.getenv("VITE_GEMINI_API_KEY")
+API_KEY = os.getenv("VITE_VERTEX_API_KEY")
 
 def load_image(file_path: str) -> types.Image:
     """Reads a local image file and returns a genai Image object."""
     path = Path(file_path)
-    
-    # Auto-detect mime type from extension
     mime_map = {
         ".png":  "image/png",
         ".jpg":  "image/jpeg",
@@ -36,29 +33,44 @@ def load_image(file_path: str) -> types.Image:
         ".webp": "image/webp",
     }
     mime_type = mime_map.get(path.suffix.lower(), "image/jpeg")
-    
     if not os.path.exists(path):
         raise FileNotFoundError(f"Image not found at {path}")
-        
     with open(path, "rb") as f:
         image_bytes = f.read()
-    
-    return types.Image(
-        image_bytes=image_bytes,
-        mime_type=mime_type,
-    )
+    return types.Image(image_bytes=image_bytes, mime_type=mime_type)
 
-def generate_video(start_frame: str, end_frame: str, prompt: str, output_path: str = None) -> dict:
+def generate_video(start_frame: str, end_frame: str, prompt: str, speech: str = None, output_path: str = None, duration_seconds: int = 8) -> dict:
     try:
-        client = genai.Client(api_key=API_KEY)
+        # 1. Initialize GenAI Client
+        use_vertex = os.getenv("VITE_GOOGLE_GENAI_USE_VERTEXAI", "true").lower() == "true"
+        
+        if use_vertex:
+            # Vertex AI mode: project and location are required, api_key must be None
+            client = genai.Client(
+                project=os.getenv("VITE_GOOGLE_CLOUD_PROJECT", "agentic-project-488820"),
+                location=os.getenv("VITE_GOOGLE_CLOUD_LOCATION", "us-central1"),
+                vertexai=True
+            )
+        else:
+            # Gemini API mode: api_key is required, project and location must be None
+            client = genai.Client(
+                api_key=API_KEY
+            )
 
-        # 1. Load starting and ending frames
+        # 2. Adjust duration to supported values (4, 6, 8 seconds for Veo 3.1)
+        supported_durations = [4, 6, 8]
+        if duration_seconds not in supported_durations:
+            new_duration = min(supported_durations, key=lambda x: abs(x - duration_seconds))
+            print(f"Warning: Duration {duration_seconds}s not supported by Veo 3.1. Snapping to {new_duration}s.")
+            duration_seconds = new_duration
+
+        # 3. Load starting and ending frames
         first_image = load_image(start_frame)
         last_image = load_image(end_frame)
 
-        # 2. Determine output path
+        # 3. Determine output path
         if not output_path:
-            videos_dir = os.path.join(os.path.dirname(__file__), "..", "generated_videos")
+            videos_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "generated_videos"))
             os.makedirs(videos_dir, exist_ok=True)
             base_name = f"{Path(start_frame).stem}_to_{Path(end_frame).stem}.mp4"
             output_path = os.path.join(videos_dir, base_name)
@@ -66,36 +78,52 @@ def generate_video(start_frame: str, end_frame: str, prompt: str, output_path: s
             os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
             
         full_prompt = f"A cinematic transition between the two scenes. {prompt}"
+        if speech:
+            full_prompt += f"\n\nInclude audio of a professional narrator saying exactly: '{speech}'"
 
-        # 3. Call Veo 3.1 directly as configured
-        operation = client.models.generate_videos(
-            model="veo-3.1-generate-preview",
+        # 4. Prompt & Source Setup
+        source = types.GenerateVideosSource(
             prompt=full_prompt,
-            image=first_image,
-            config=types.GenerateVideosConfig(
-                last_frame=last_image,
-                aspect_ratio="9:16",      # Using 9:16 to match the storyboard portrait orientation
-                duration_seconds="8",     # Must be 8 for interpolation per user spec
-                number_of_videos=1,
-            ),
+            image=first_image
         )
 
-        # 4. Polling for completion
-        max_attempts = 60  # ~15 minutes
-        attempts = 0
+        config = types.GenerateVideosConfig(
+            last_frame=last_image,
+            aspect_ratio="9:16",
+            number_of_videos=1,
+            duration_seconds=int(duration_seconds),
+            person_generation="allow_all",
+            generate_audio=True,
+            resolution="720p",
+            seed=0,
+        )
+
+        # 5. Generate the video generation request
+        print(f"Generating Vertex AI Video for {output_path} (Duration: {duration_seconds}s)...")
+        operation = client.models.generate_videos(
+            model="veo-3.1-generate-001", 
+            source=source, 
+            config=config
+        )
+
+        # 6. Polling for completion
         while not operation.done:
-            attempts += 1
-            if attempts > max_attempts:
-                return {"success": False, "error": "Video generation timed out."}
+            print(f"Video for {os.path.basename(output_path)} is still in progress... Check again in 15 seconds. (Done: {operation.done})")
             time.sleep(15)
             operation = client.operations.get(operation)
 
-        # 5. Save the final video
-        if operation.response and operation.response.generated_videos:
-            generated_video = operation.response.generated_videos[0]
-            
-            # Download file context
-            client.files.download(file=generated_video.video)
+        print(f"Operation finished.")
+        # Try to print some info about the operation if it supports it
+        try:
+            print(f"DEBUG: Full Operation Object: {operation}")
+        except:
+            pass
+
+        # 7. Extract and Save Result
+        response = operation.result
+        
+        if response and response.generated_videos and len(response.generated_videos) > 0:
+            generated_video = response.generated_videos[0]
             
             # Save safely to disk
             abs_out_path = os.path.abspath(output_path)
@@ -106,13 +134,26 @@ def generate_video(start_frame: str, end_frame: str, prompt: str, output_path: s
                 "video_path": abs_out_path,
                 "start_frame": start_frame,
                 "end_frame": end_frame,
+                "duration": duration_seconds,
                 "prompt": full_prompt
             }
         else:
-            return {"success": False, "error": "Generation failed or returned no video."}
+            # Check for error in operation metadata
+            error_msg = "Generation completed but returned no video response."
+            
+            # Safely check for errors in operation or metadata
+            try:
+                op_json = str(operation)
+                if "partial_errors" in op_json or "error" in op_json:
+                    error_msg += f" Details: {op_json}"
+            except:
+                pass
+                
+            return {"success": False, "error": error_msg}
 
     except Exception as e:
-        return {"success": False, "error": str(e)}
+        import traceback
+        return {"success": False, "error": f"{str(e)}\n{traceback.format_exc()}"}
 
 
 if __name__ == "__main__":
@@ -125,14 +166,17 @@ if __name__ == "__main__":
         start = params.get("start_frame")
         end = params.get("end_frame")
         p = params.get("prompt", "")
+        speech = params.get("speech", None)
         out = params.get("output_path")
+        dur = params.get("duration_seconds", 8) # Default to 8 if not provided
 
         if not start or not end:
             print(json.dumps({"success": False, "error": "Missing 'start_frame' or 'end_frame'."}))
             sys.exit(1)
 
-        result = generate_video(start, end, p, out)
+        result = generate_video(start, end, p, speech, out, dur)
         print(json.dumps(result, indent=2))
+
         
     except json.JSONDecodeError as e:
         print(json.dumps({"success": False, "error": f"Invalid JSON input: {e}"}))

@@ -139,10 +139,18 @@ def build_prompt(subject_description: str, text_overlay: str,
             f"using stylized, high-quality typography matching the aesthetic. Avoid messy or distorted trademark symbols."
         )
 
-    enhanced_subject = subject_description
+    # ── Anti-Deepfake / Likeness Protection ──────────────────────────────────
+    anti_deepfake_instruction = (
+        " IMPORTANT: Do NOT generate realistic human faces or recognizable likenesses of "
+        "real political figures, celebrities, or public individuals. Instead, represent them symbolically "
+        "(e.g., from the back, silhouettes, using recognizable clothing without faces, or symbols like flags "
+        "and podiums) so that the content is stylistically safe and universally recognizable."
+    )
+
+    enhanced_subject = subject_description + anti_deepfake_instruction
     if is_character and "vox" in style.get("name", "").lower():
-        # Add cinematic lighting and high-detail facial features for characters
-        enhanced_subject += ", highly detailed facial features, expressive eyes, realistic skin texture, cinematic lighting"
+        # Add cinematic lighting and high-detail features for generic characters
+        enhanced_subject += ", highly detailed generic facial features, cinematic lighting"
 
     # ── Fill in the structural JSON spec ─────────────────────────────────────
     style_spec = copy.deepcopy(style)

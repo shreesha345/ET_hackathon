@@ -21,8 +21,8 @@ def list_videos() -> dict:
                 name_part = filename.split(".mp4")[0]
                 num_part = name_part.split("_")[-1]
                 return int(num_part)
-            except ValueError:
-                return filename
+            except (ValueError, IndexError):
+                return 999
 
         videos.sort(key=lambda x: extract_number(x["name"]))
         

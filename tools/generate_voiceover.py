@@ -3,9 +3,10 @@ import os
 import wave
 import sys
 import subprocess
-from google import genai
-from google.genai import types
-from dotenv import load_dotenv
+from typing import Any
+from google import genai  # type: ignore[import-not-found]
+from google.genai import types  # type: ignore[import-not-found]
+from dotenv import load_dotenv  # type: ignore[import-not-found]
 
 # Load environment variables
 load_dotenv()
@@ -27,7 +28,6 @@ def convert_to_wav(input_path, output_path):
     Useful if some audios are .mp3 etc.
     """
     if input_path == output_path:
-        # Don't overwrite if same name but different ext
         return False
     
     cmd = [
@@ -41,25 +41,6 @@ def convert_to_wav(input_path, output_path):
     result = subprocess.run(cmd, capture_output=True, text=True)
     return result.returncode == 0
 
-def convert_dir_to_wav(directory):
-    """
-    Scans a directory for audio files and converts them to .wav
-    """
-    if not os.path.exists(directory):
-        return {"success": False, "error": f"Directory {directory} not found."}
-    
-    files = os.listdir(directory)
-    converted = []
-    for f in files:
-        if f.lower().endswith((".mp3", ".m4a", ".ogg", ".aac", ".flac")) and not f.endswith(".wav"):
-            input_path = os.path.join(directory, f)
-            output_name = os.path.splitext(f)[0] + ".wav"
-            output_path = os.path.join(directory, output_name)
-            if convert_to_wav(input_path, output_path):
-                converted.append(f)
-    
-    return {"success": True, "message": f"Converted {len(converted)} files to .wav", "converted_files": converted}
-
 def get_wav_duration(filename):
     """Returns the duration of a wav file in seconds."""
     try:
@@ -71,9 +52,13 @@ def get_wav_duration(filename):
     except:
         return 0
 
-def generate_sense_audio(sense_id, text, voice_name="Kore"):
+def generate_full_narration(text, voice_name="Kore"):
+    """
+    Generates a single continuous narration audio from the full audio_script.
+    Saves to generated_audio/full_narration.wav.
+    """
     # Initialize client
-    api_key = os.getenv("VITE_GEMINI_API_KEY")
+    api_key = os.getenv("VITE_VERTEX_API_KEY")
     client = genai.Client(api_key=api_key)
 
     # Ensure output directory exists
@@ -81,7 +66,7 @@ def generate_sense_audio(sense_id, text, voice_name="Kore"):
     if not os.path.exists(audio_dir):
         os.makedirs(audio_dir)
 
-    output_filename = os.path.join(audio_dir, f"sense_{sense_id}.wav")
+    output_filename = os.path.join(audio_dir, "full_narration.wav")
 
     # Define the advanced, improved Vox-style prompt
     prompt = f"""
@@ -102,12 +87,13 @@ A high-end recording booth. The air is dry and quiet. Every syllable is crisp.
 * Moderate-Slow Pacing: Allow space for the viewer to process complex information.
 * Mid-Sentence Pauses: Use natural, slight pauses after commas for clarity.
 * Emphasis: Subtle stress on crucial dates, figures, and names.
+* TOTAL DURATION: The full narration MUST be 60 seconds or less.
 
 ### TRANSCRIPT TO PERFORM:
 {text}
 """
 
-    print(f"Generating audio for sense {sense_id}...")
+    print(f"Generating full narration audio...")
     
     try:
         # Use voice model from env if available
@@ -134,12 +120,15 @@ A high-end recording booth. The air is dry and quiet. Every syllable is crisp.
             data = audio_part.inline_data.data
             wave_file(output_filename, data)
             duration = get_wav_duration(output_filename)
+            
+            if duration > 60:
+                print(f"WARNING: Generated audio is {duration}s, exceeding 60s limit!")
+            
             return {
                 "success": True, 
-                "message": f"Saved segment {sense_id} audio to {output_filename}", 
+                "message": f"Saved full narration to {output_filename}", 
                 "audio_path": output_filename,
                 "duration": duration,
-                "segment_id": sense_id
             }
         else:
             return {"success": False, "error": "No audio data found in response."}
@@ -147,9 +136,10 @@ A high-end recording booth. The air is dry and quiet. Every syllable is crisp.
     except Exception as e:
         return {"success": False, "error": str(e)}
 
+
 def generate_all_audio(script_path="script.json", voice_name="Kore"):
     """
-    Reads script.json, and generates audio for each sense in it.
+    Reads script.json and generates a single continuous narration from audio_script.
     """
     if not os.path.exists(script_path):
         return {"success": False, "error": f"Script file {script_path} not found."}
@@ -160,39 +150,41 @@ def generate_all_audio(script_path="script.json", voice_name="Kore"):
     except Exception as e:
         return {"success": False, "error": f"Failed to read {script_path}: {str(e)}"}
 
-    segments = script_data.get("segments", [])
-    if not segments:
-        return {"success": False, "error": "No segments found in script."}
-
-    results = []
-    durations = {}
-    for seg in segments:
-        segment_id = seg.get("segment_id")
-        text = seg.get("narrator_speech")
-        if segment_id is not None and text:
-            res = generate_sense_audio(segment_id, text, voice_name)
-            results.append(res)
-            if res.get("success"):
-                durations[segment_id] = res.get("duration")
+    # New format: prompt.audio_script
+    prompt = script_data.get("prompt", {})
+    audio_script = prompt.get("audio_script", "")
+    
+    if not audio_script:
+        # Fallback: try old format with segments
+        segments = script_data.get("segments", [])
+        if segments:
+            audio_script = " ".join(seg.get("narrator_speech", "") for seg in segments)
         else:
-            results.append({"success": False, "segment_id": segment_id, "error": "Missing segment_id or narrator_speech"})
+            return {"success": False, "error": "No audio_script found in script.json prompt."}
 
-    success_count = sum(1 for r in results if r.get("success"))
-    return {
-        "success": True, 
-        "message": f"Processed {len(segments)} segments, {success_count} successful.",
-        "results": results,
-        "durations": durations
-    }
+    word_count: int = len(audio_script.split())
+    estimated_duration: float = float(word_count) / 2.5
+    estimated_duration = round(estimated_duration, 1)
+    
+    if estimated_duration > 60:
+        print(f"WARNING: Script has {word_count} words (~{estimated_duration}s). May exceed 60s limit.")
+
+    result: dict[str, Any] = generate_full_narration(audio_script, voice_name)
+    
+    if result.get("success"):
+        result["word_count"] = word_count
+        result["estimated_duration"] = estimated_duration
+    
+    return result
 
 
 def full_process(script_path="script.json", voice_name="Kore"):
     """
-    1. Generates all audio files from script.json
-    2. Merges them with videos in generated_videos/
+    1. Generates the full narration audio from script.json
+    2. Merges it with videos in generated_videos/
     3. Produces final output.mp4
     """
-    print("Step 1: Generating all audio files...")
+    print("Step 1: Generating full narration audio...")
     audio_res = generate_all_audio(script_path, voice_name)
     if not audio_res.get("success"):
         return audio_res
@@ -203,8 +195,8 @@ def full_process(script_path="script.json", voice_name="Kore"):
 
 def merge_audio_and_video(videos_dir="generated_videos", audio_dir="generated_audio", output_final="output.mp4"):
     """
-    Merges all sense_i.mp4 from videos_dir/ with sense_i.wav from audio_dir/
-    and then concatenates them.
+    Concatenates all sense_X.mp4 videos from videos_dir/ into one video,
+    then overlays the full narration audio from audio_dir/full_narration.wav.
     """
     temp_dir = "temp_merges"
     if not os.path.exists(videos_dir):
@@ -213,7 +205,7 @@ def merge_audio_and_video(videos_dir="generated_videos", audio_dir="generated_au
     if not os.path.exists(temp_dir):
         os.makedirs(temp_dir)
 
-    # Find all videos
+    # Find all video clips
     video_files = [f for f in os.listdir(videos_dir) if f.startswith("sense_") and f.endswith(".mp4")]
     
     def extract_number(filename):
@@ -225,103 +217,106 @@ def merge_audio_and_video(videos_dir="generated_videos", audio_dir="generated_au
             return 999
 
     video_files.sort(key=extract_number)
-    merged_files = []
+    
+    if not video_files:
+        return {"success": False, "error": "No sense_X.mp4 video clips found."}
 
-    for video_file in video_files:
-        sense_id = extract_number(video_file)
-        audio_file = f"sense_{sense_id}.wav"
-        audio_path = os.path.join(audio_dir, audio_file)
-        video_path = os.path.join(videos_dir, video_file)
-        
-        temp_output = os.path.join(temp_dir, f"ready_{sense_id}.mp4")
-        
-        if os.path.exists(audio_path):
-            print(f"Merging sense {sense_id} video (bg) and VO (primary)...")
-            
-            # Check if video has an audio stream to mix with
-            probe_cmd = ["ffprobe", "-v", "error", "-select_streams", "a", "-show_entries", "stream=index", "-of", "csv=p=0", video_path]
-            has_audio = subprocess.run(probe_cmd, capture_output=True, text=True).stdout.strip() != ""
-            
-            if has_audio:
-                # MIX: Video audio at 30% volume, VO at 100%
-                cmd = [
-                    "ffmpeg", "-y",
-                    "-stream_loop", "-1",
-                    "-i", video_path,
-                    "-i", audio_path,
-                    "-filter_complex", "[0:a]volume=0.3[bg];[1:a]volume=1.0[vo];[bg][vo]amix=inputs=2:duration=shortest[aout]",
-                    "-map", "0:v",
-                    "-map", "[aout]",
-                    "-c:v", "libx264",
-                    "-c:a", "aac",
-                    "-shortest",
-                    temp_output
-                ]
-            else:
-                # No audio in video, just use VO
-                cmd = [
-                    "ffmpeg", "-y",
-                    "-stream_loop", "-1",
-                    "-i", video_path,
-                    "-i", audio_path,
-                    "-map", "0:v",
-                    "-map", "1:a",
-                    "-c:v", "libx264",
-                    "-c:a", "aac",
-                    "-shortest",
-                    temp_output
-                ]
-            subprocess.run(cmd, capture_output=True, text=True)
-        else:
-            print(f"Warning: VO not found for sense {sense_id}. Using original video.")
-            cmd = ["ffmpeg", "-y", "-i", video_path, "-c", "copy", temp_output]
-            subprocess.run(cmd, capture_output=True, text=True)
-
-        if os.path.exists(temp_output):
-            merged_files.append(temp_output)
-
-    if not merged_files:
-        return {"success": False, "error": "No segments found to compile."}
-
-    # Concatenate
+    # Step 1: Concatenate all video clips (video-only) into one continuous video
     list_file_path = os.path.join(temp_dir, "concat_list.txt")
     with open(list_file_path, "w") as f:
-        for m in merged_files:
-            f.write(f"file '{os.path.basename(m)}'\n")
+        for vf in video_files:
+            abs_path = os.path.abspath(os.path.join(videos_dir, vf))
+            f.write(f"file '{abs_path}'\n")
 
-    print("Concatenating segments...")
+    concat_video_path = os.path.join(temp_dir, "concat_video.mp4")
+    print("Concatenating video clips...")
     concat_cmd = [
         "ffmpeg", "-y",
         "-f", "concat",
         "-safe", "0",
-        "-i", "concat_list.txt",
+        "-i", list_file_path,
         "-c", "copy",
-        "final_output.mp4"
+        concat_video_path
     ]
-    result = subprocess.run(concat_cmd, cwd=temp_dir, capture_output=True, text=True)
+    result = subprocess.run(concat_cmd, capture_output=True, text=True)
     
-    if os.path.exists(os.path.join(temp_dir, "final_output.mp4")):
-        if os.path.exists(output_final):
-            os.remove(output_final)
-        os.rename(os.path.join(temp_dir, "final_output.mp4"), output_final)
-        return {"success": True, "message": "Successfully merged and compiled final video.", "output_file": os.path.abspath(output_final)}
-    else:
+    if not os.path.exists(concat_video_path):
         return {"success": False, "error": f"Concat failed: {result.stderr}"}
 
+    # Step 2: Overlay full narration audio
+    narration_path = os.path.join(audio_dir, "full_narration.wav")
+    
+    if os.path.exists(narration_path):
+        print("Overlaying full narration audio...")
+        
+        # Check if concatenated video has audio (from Veo)
+        probe_cmd = ["ffprobe", "-v", "error", "-select_streams", "a", "-show_entries", "stream=index", "-of", "csv=p=0", concat_video_path]
+        has_audio = subprocess.run(probe_cmd, capture_output=True, text=True).stdout.strip() != ""
+        
+        if has_audio:
+            # Mix: Video audio at 30% volume, narration at 100%
+            merge_cmd = [
+                "ffmpeg", "-y",
+                "-i", concat_video_path,
+                "-i", narration_path,
+                "-filter_complex", "[0:a]volume=0.3[bg];[1:a]volume=1.0[vo];[bg][vo]amix=inputs=2:duration=shortest[aout]",
+                "-map", "0:v",
+                "-map", "[aout]",
+                "-c:v", "libx264",
+                "-c:a", "aac",
+                "-shortest",
+                output_final
+            ]
+        else:
+            # No video audio, just use narration
+            merge_cmd = [
+                "ffmpeg", "-y",
+                "-i", concat_video_path,
+                "-i", narration_path,
+                "-map", "0:v",
+                "-map", "1:a",
+                "-c:v", "libx264",
+                "-c:a", "aac",
+                "-shortest",
+                output_final
+            ]
+        subprocess.run(merge_cmd, capture_output=True, text=True)
+    else:
+        # No narration audio, just copy the concatenated video
+        print("Warning: No full_narration.wav found. Using video-only.")
+        import shutil
+        shutil.copy2(concat_video_path, output_final)
+
+    if os.path.exists(output_final):
+        return {
+            "success": True, 
+            "message": "Successfully compiled final video with narration.", 
+            "output_file": os.path.abspath(output_final),
+            "clips_used": len(video_files)
+        }
+    else:
+        return {"success": False, "error": "Final output.mp4 was not created."}
+
+
 def get_all_durations(audio_dir="generated_audio"):
-    """Scans the audio directory and returns a dictionary of sense_id: duration."""
+    """Scans the audio directory and returns duration info."""
     if not os.path.exists(audio_dir):
         return {"success": False, "error": f"Directory {audio_dir} not found."}
     
-    files = [f for f in os.listdir(audio_dir) if f.startswith("sense_") and f.endswith(".wav")]
     durations = {}
     
+    # Check for full narration file
+    full_narration = os.path.join(audio_dir, "full_narration.wav")
+    if os.path.exists(full_narration):
+        durations["full_narration"] = get_wav_duration(full_narration)
+    
+    # Also check for any legacy sense_X.wav files
+    files = [f for f in os.listdir(audio_dir) if f.startswith("sense_") and f.endswith(".wav")]
     for f in files:
         try:
-            # Extract sense_id from "sense_1.wav"
             sense_id = int(f.split("_")[1].split(".")[0])
             path = os.path.join(audio_dir, f)
-            durations[sense_id] = get_wav_duration(path)
+            durations[f"sense_{sense_id}"] = get_wav_duration(path)
         except:
             continue
             
@@ -334,14 +329,13 @@ if __name__ == "__main__":
         action = params.get("action", "full_process")
 
         if action == "generate":
-            sense_id = params.get("sense_id")
             text = params.get("text")
             voice_name = params.get("voice_name", "Kore")
             
-            if sense_id is None or text is None:
-                print(json.dumps({"error": "sense_id and text are required for generate action"}))
+            if text is None:
+                print(json.dumps({"error": "text is required for generate action"}))
             else:
-                result = generate_sense_audio(sense_id, text, voice_name)
+                result = generate_full_narration(text, voice_name)
                 print(json.dumps(result))
 
         elif action == "generate_all":
@@ -354,11 +348,6 @@ if __name__ == "__main__":
             script_path = params.get("script_path", "script.json")
             voice_name = params.get("voice_name", "Kore")
             result = full_process(script_path, voice_name)
-            print(json.dumps(result))
-
-        elif action == "convert_dir":
-            directory = params.get("directory", "generated_audio")
-            result = convert_dir_to_wav(directory)
             print(json.dumps(result))
 
         elif action == "merge":
@@ -375,4 +364,3 @@ if __name__ == "__main__":
 
     except Exception as e:
         print(json.dumps({"error": str(e)}))
-

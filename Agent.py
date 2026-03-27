@@ -425,6 +425,114 @@ class Agent:
         return f"Manager restored. Work done: {work_summary}"
 
     # ═══════════════════════════════════════════════════════════════════════════
+    # RUN SKILL IN ISOLATION (runs a skill without switching the manager)
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    def _run_skill_isolated(self, skill_name: str, query: str) -> dict:
+        """
+        Run a specialist skill in an isolated chat session.
+
+        Unlike find_and_use_skill, this does NOT switch the manager's mode.
+        It creates a temporary chat with the skill's prompt and tools,
+        runs the query through it, handles tool calls, and returns the result.
+        """
+        step_id = self.memory.add_step(f"Running skill (isolated): {skill_name}", status="in_progress")
+        skill_file = os.path.join(self.SKILLS_DIR, f"{skill_name}.md")
+
+        if not os.path.exists(skill_file):
+            self.memory.update_step(step_id, "error")
+            return {"error": f"Skill '{skill_name}' not found in skills/ folder."}
+
+        try:
+            content = open(skill_file, encoding="utf-8").read().strip()
+
+            # Parse skill prompt and tools
+            if "---TOOLS---" in content:
+                prompt_part, tools_part = content.split("---TOOLS---", 1)
+                skill_prompt = prompt_part.strip() + REPORTING_INSTRUCTION
+                skill_tools = json.loads(tools_part.strip())
+            else:
+                skill_prompt = content + REPORTING_INSTRUCTION
+                skill_tools = []
+
+            # Build tool declarations for the isolated session
+            seen_tools = {}
+            for t in (MANAGER_TOOLS + skill_tools):
+                if "name" in t:
+                    seen_tools[t["name"]] = t
+            tool_declarations = [
+                types.Tool(function_declarations=[types.FunctionDeclaration(**t)])
+                for t in seen_tools.values()
+            ]
+
+            # Create an isolated chat session
+            isolated_chat = self.client.chats.create(
+                model=self.MODEL_ID,
+                config=types.GenerateContentConfig(
+                    system_instruction=skill_prompt,
+                    tools=tool_declarations,
+                ),
+            )
+
+            # Send the query
+            with Spinner(f"Running skill '{skill_name}'..."):
+                response = isolated_chat.send_message(query)
+
+            # Handle tool calls within the isolated session
+            max_iterations = 20  # Safety limit
+            iteration = 0
+            while (response.candidates[0].content.parts
+                   and any(p.function_call for p in response.candidates[0].content.parts)
+                   and iteration < max_iterations):
+                iteration += 1
+                function_responses = []
+
+                for part in response.candidates[0].content.parts:
+                    if not part.function_call:
+                        continue
+
+                    fn_name = part.function_call.name
+                    fn_args = dict(part.function_call.args)
+                    self._log("Isolated Tool", f"{skill_name}.{fn_name}({fn_args})")
+
+                    if fn_name == "reset_to_manager":
+                        # Skill is done — capture the summary and stop
+                        work_summary = fn_args.get("work_summary", "Completed")
+                        self.memory.update_step(step_id, "success")
+                        self.memory.add_step(
+                            f"Isolated skill '{skill_name}' done → {work_summary}",
+                            status="done",
+                        )
+                        return {"result": work_summary}
+                    elif fn_name in ("list_skills", "find_and_use_skill", "run_skill"):
+                        # Don't allow nested skill switching from isolated mode
+                        function_responses.append(
+                            types.Part.from_function_response(
+                                name=fn_name,
+                                response={"error": "Not available in isolated skill mode."},
+                            )
+                        )
+                    else:
+                        # Run the tool script normally
+                        tool_result = self._run_tool_script(fn_name, fn_args)
+                        function_responses.append(
+                            types.Part.from_function_response(name=fn_name, response=tool_result)
+                        )
+
+                if function_responses:
+                    with Spinner(f"Skill '{skill_name}' processing..."):
+                        response = isolated_chat.send_message(function_responses)
+                else:
+                    break
+
+            self.memory.update_step(step_id, "success")
+            return {"result": response.text or "[No response from skill]"}
+
+        except Exception as e:
+            self.memory.update_step(step_id, "error")
+            return {"error": f"Error running skill '{skill_name}': {e}"}
+
+    # ═══════════════════════════════════════════════════════════════════════════
     # TOOL SCRIPT RUNNER (runs Python scripts from tools/ folder)
     # ═══════════════════════════════════════════════════════════════════════════
 
@@ -552,7 +660,10 @@ class Agent:
 
                 # ── Handle: run_skill (run a skill without switching modes) ──
                 elif fn_name == "run_skill":
-                    skill_result = self._run_tool_script("run_skill", fn_args)
+                    skill_result = self._run_skill_isolated(
+                        fn_args.get("skill_name", ""),
+                        fn_args.get("query", ""),
+                    )
                     self._log("Skill Result", f"{fn_args.get('skill_name', '?')} → done", Colors.GREEN)
                     function_responses.append(
                         types.Part.from_function_response(name=fn_name, response=skill_result)

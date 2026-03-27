@@ -12,11 +12,12 @@ import sys
 import json
 import time
 import base64
+from typing import Optional
 from pathlib import Path
-from google import genai
-from google.genai import types
+from google import genai  # type: ignore[import-not-found]
+from google.genai import types  # type: ignore[import-not-found]
 import os
-from dotenv import load_dotenv
+from dotenv import load_dotenv  # type: ignore[import-not-found]
 
 load_dotenv()
 
@@ -39,7 +40,7 @@ def load_image(file_path: str) -> types.Image:
         image_bytes = f.read()
     return types.Image(image_bytes=image_bytes, mime_type=mime_type)
 
-def generate_video(start_frame: str, end_frame: str, prompt: str, speech: str = None, output_path: str = None, duration_seconds: int = 8) -> dict:
+def generate_video(start_frame: str, end_frame: Optional[str] = None, prompt: str = "", speech: Optional[str] = None, output_path: Optional[str] = None, duration_seconds: int = 8) -> dict:
     try:
         # 1. Initialize GenAI Client
         use_vertex = os.getenv("VITE_GOOGLE_GENAI_USE_VERTEXAI", "true").lower() == "true"
@@ -61,10 +62,15 @@ def generate_video(start_frame: str, end_frame: str, prompt: str, speech: str = 
         supported_durations = [4, 6, 8]
         if duration_seconds not in supported_durations:
             new_duration = min(supported_durations, key=lambda x: abs(x - duration_seconds))
-            print(f"Warning: Duration {duration_seconds}s not supported by Veo 3.1. Snapping to {new_duration}s.")
+            # Progress logs go to stderr so stdout stays valid JSON for the manager
+            print(f"Warning: Duration {duration_seconds}s not supported by Veo 3.1. Snapping to {new_duration}s.", file=sys.stderr)
             duration_seconds = new_duration
 
-        # 3. Load starting and ending frames
+        # 3. Load frames — require distinct start/end frames
+        if not end_frame:
+            raise ValueError("'end_frame' is required and must be different from 'start_frame'.")
+        if end_frame == start_frame:
+            raise ValueError("'start_frame' and 'end_frame' must be different images to avoid static outputs.")
         first_image = load_image(start_frame)
         last_image = load_image(end_frame)
 
@@ -77,9 +83,12 @@ def generate_video(start_frame: str, end_frame: str, prompt: str, speech: str = 
         else:
             os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
             
-        full_prompt = f"A cinematic transition between the two scenes. {prompt}"
-        if speech:
-            full_prompt += f"\n\nInclude audio of a professional narrator saying exactly: '{speech}'"
+        if start_frame == end_frame:
+            full_prompt = f"A cinematic video starting from the reference image. {prompt}"
+        else:
+            full_prompt = f"A cinematic transition between the two scenes. {prompt}"
+        # Sound design only; no narration/voices.
+        full_prompt += "\n\nAdd rich ambient and foley sound effects that match the motion; absolutely no narration or voices."
 
         # 4. Prompt & Source Setup
         source = types.GenerateVideosSource(
@@ -93,13 +102,13 @@ def generate_video(start_frame: str, end_frame: str, prompt: str, speech: str = 
             number_of_videos=1,
             duration_seconds=int(duration_seconds),
             person_generation="allow_all",
-            generate_audio=True,
+            generate_audio=True,  # enable ambient SFX (no narration)
             resolution="720p",
             seed=0,
         )
 
         # 5. Generate the video generation request
-        print(f"Generating Vertex AI Video for {output_path} (Duration: {duration_seconds}s)...")
+        print(f"Generating Vertex AI Video for {output_path} (Duration: {duration_seconds}s)...", file=sys.stderr)
         operation = client.models.generate_videos(
             model="veo-3.1-generate-001", 
             source=source, 
@@ -108,14 +117,14 @@ def generate_video(start_frame: str, end_frame: str, prompt: str, speech: str = 
 
         # 6. Polling for completion
         while not operation.done:
-            print(f"Video for {os.path.basename(output_path)} is still in progress... Check again in 15 seconds. (Done: {operation.done})")
+            print(f"Video for {os.path.basename(output_path)} is still in progress... Check again in 15 seconds. (Done: {operation.done})", file=sys.stderr)
             time.sleep(15)
             operation = client.operations.get(operation)
 
-        print(f"Operation finished.")
+        print("Operation finished.", file=sys.stderr)
         # Try to print some info about the operation if it supports it
         try:
-            print(f"DEBUG: Full Operation Object: {operation}")
+            print(f"DEBUG: Full Operation Object: {operation}", file=sys.stderr)
         except:
             pass
 
@@ -170,7 +179,7 @@ if __name__ == "__main__":
         out = params.get("output_path")
         dur = params.get("duration_seconds", 8) # Default to 8 if not provided
 
-        if not start or not end:
+        if not start:
             print(json.dumps({"success": False, "error": "Missing 'start_frame' or 'end_frame'."}))
             sys.exit(1)
 

@@ -23,7 +23,7 @@ def list_audio() -> dict:
                 num_part = base.split("_")[-1]
                 return int(num_part)
             except (ValueError, IndexError):
-                return name
+                return 999
 
         audio.sort(key=lambda x: extract_number(x["name"]))
         

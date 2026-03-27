@@ -19,3 +19,8 @@ extra
 generated_audio
 compiled_video.mp4
 output.mp4
+
+# Keep dry-run sample assets in repo
+!samples/
+!samples/dry_run/
+!samples/dry_run/**

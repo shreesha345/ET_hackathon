@@ -258,8 +258,9 @@ class Agent:
     """
 
     MODEL_ID   = "gemini-3-flash-preview"    # The LLM model to use
-    SKILLS_DIR = "skills"               # Where skill .md files live
-    TOOLS_DIR  = "tools"                # Where tool .py scripts live
+    BASE_DIR   = os.path.dirname(__file__)   # Project root for this file
+    SKILLS_DIR = os.path.join(BASE_DIR, "skills")  # Where skill .md files live
+    TOOLS_DIR  = os.path.join(BASE_DIR, "tools")   # Where tool .py scripts live
 
     def __init__(self):
         # Load the manager prompt (from prompt.md or default)
@@ -269,7 +270,8 @@ class Agent:
         self.system_prompt  = self._manager_prompt   # Active system prompt
         self.current_tools  = []                      # Extra tools from loaded skill
         self.chat           = None                    # Chat session (reset on skill switch)
-        self.memory         = Memory()                # The scratchpad
+        memory_file = os.path.join(self.BASE_DIR, "memory.json")
+        self.memory = Memory(storage_file=memory_file)  # The scratchpad
 
         # Initialize the Google GenAI client
         self.client = genai.Client(
@@ -557,6 +559,7 @@ class Agent:
             try:
                 result = subprocess.run(
                     [sys.executable, script_path, json.dumps(params)],
+                    cwd=self.BASE_DIR,
                     capture_output=True,
                     text=True,
                     check=True,

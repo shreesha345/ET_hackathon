@@ -1,14 +1,19 @@
 """
-cleanup.py — Safely remove generated artifacts created by the Agent.
+cleanup.py - Remove generated artifacts created by the Agent.
 
-What it deletes (allow‑list):
-- generated_frames/*
-- generated_audio/*
-- generated_videos/*
-- extra/* (often used for temp assets)
-- script.json (active project script)
+Deletes (allow-list):
+- generated_frames/
+- generated_audio/
+- generated_videos/
+- temp_merges/
+- extra/
+- job_runs/
+- script.json
+- concatenated_video.mp4
+- output.mp4
+- final_output.mp4
 
-It never touches source code, skills, tools, or this script itself.
+Keeps memory.json but truncates it to an empty list.
 """
 
 from __future__ import annotations
@@ -22,33 +27,34 @@ ALLOW_DIRS = [
     "generated_frames",
     "generated_audio",
     "generated_videos",
+    "temp_merges",
+    "extra",
+    "job_runs",
 ]
 
 ALLOW_FILES = [
     "script.json",
+    "concatenated_video.mp4",
+    "output.mp4",
+    "final_output.mp4",
 ]
 
 
-def purge_dir(path: Path) -> int:
-    """Delete all contents of path if it exists; keep the folder itself."""
+def delete_dir(path: Path) -> int:
+    """Delete an entire folder tree if it exists."""
     if not path.exists():
         return 0
-    removed = 0
-    for item in path.iterdir():
-        try:
-            if item.is_dir():
-                shutil.rmtree(item)
-            else:
-                item.unlink()
-            removed += 1
-        except Exception as exc:  # pragma: no cover - best‑effort cleanup
-            print(f"[WARN] Could not remove {item}: {exc}")
-    return removed
+    try:
+        shutil.rmtree(path)
+        return 1
+    except Exception as exc:  # pragma: no cover
+        print(f"[WARN] Could not remove {path}: {exc}")
+        return 0
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Clean generated artifacts produced by the Agent (frames, audio, videos, extras)."
+        description="Clean generated artifacts produced by the Agent."
     )
     parser.add_argument(
         "--dry-run",
@@ -65,16 +71,13 @@ def main() -> None:
         if not target.exists():
             continue
         if args.dry_run:
-            contents = list(target.iterdir())
-            if contents:
-                print(f"[DRY] {target} -> would remove {len(contents)} item(s)")
+            print(f"[DRY] {target} -> would delete folder")
             continue
-        removed = purge_dir(target)
+        removed = delete_dir(target)
         if removed:
-            print(f"[OK] Cleared {removed} item(s) in {target}")
+            print(f"[OK] Deleted folder {target}")
         total_removed += removed
 
-    # Remove allow-listed files (except memory.json which is truncated separately)
     for rel in ALLOW_FILES:
         target = repo_root / rel
         if not target.exists():
@@ -85,15 +88,15 @@ def main() -> None:
         try:
             target.unlink()
             total_removed += 1
-            print(f"[OK] Deleted {target}")
+            print(f"[OK] Deleted file {target}")
         except Exception as exc:  # pragma: no cover
             print(f"[WARN] Could not delete {target}: {exc}")
 
-    # Truncate memory.json instead of deleting
+    # Truncate memory.json instead of deleting it.
     mem_file = repo_root / "memory.json"
     if mem_file.exists():
         if args.dry_run:
-            print(f"[DRY] {mem_file} -> would truncate file to empty JSON []")
+            print(f"[DRY] {mem_file} -> would truncate to []")
         else:
             try:
                 mem_file.write_text("[]\n", encoding="utf-8")
@@ -101,10 +104,10 @@ def main() -> None:
             except Exception as exc:  # pragma: no cover
                 print(f"[WARN] Could not truncate {mem_file}: {exc}")
 
-    if not args.dry_run:
-        print(f"Done. Removed {total_removed} item(s).")
-    else:
+    if args.dry_run:
         print("Dry run complete. No files were deleted.")
+    else:
+        print(f"Done. Removed {total_removed} item(s).")
 
 
 if __name__ == "__main__":

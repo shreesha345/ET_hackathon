@@ -1,73 +1,198 @@
-# ET Agent - Multi-Agent Coordination Framework 🚀
+# AI News Video Studio (ET)
 
-A simple, powerful, and highly extensible framework for building AI agent systems. This project implements a **Manager-Specialist** coordination pattern, allowing a central manager to discover, load, and delegate tasks to specialized agents with their own set of tools.
+## Problem Statement
 
----
+**AI News Video Studio — Automatically transform any ET article or breaking news into a broadcast-quality short video (60–120 seconds) with AI-generated narration, animated data visuals, and contextual overlays.**
 
-## 🌟 Key Features
+## What We Built
 
-- **Manager-Specialist Architecture**: A central Manager handles high-level intent and delegates execution to specialized sub-agents (Skills).
-- **Markdown-Based Skill System**: Define agent personas, system prompts, and tool schemas directly in `.md` files in the `skills/` directory.
-- **Standalone Script Tools**: Tools are independent Python scripts located in the `tools/` folder, executed dynamically by the agent via `subprocess`.
-- **Advanced Scratchpad (Memory)**: A persistent `memory.json` system that tracks every step, status, and handover summary between agents.
-- **Robust Handover Logic**: Specialists report their work using `reset_to_manager`, providing a summary and suggested `next_steps` for the Manager to follow.
-- **Premium Terminal UX**: Features ANSI-colorized logs and a real-time loading spinner for a smooth developer experience.
-- **Google GenAI & Vertex AI**: Fully integrated with the `google-genai` SDK, supporting both Vertex AI and standard Gemini API keys.
+We built a Manager + Specialist multi-agent pipeline that converts an article URL into a short-form news video.
 
----
+High-level flow:
+1. Scrape article and generate structured script (`script.json`)
+2. Generate storyboard frames (`generated_frames/frame_1..8.jpg`)
+3. Generate continuous narration (`generated_audio/full_narration.wav`)
+4. Generate motion clips (`generated_videos/sense_1..8.mp4`)
+5. Merge clips + narration into final video (`output.mp4`)
 
-## 🛠️ How it Works
+Then we wrapped the pipeline with a FastAPI service so frontend can:
+- Start jobs
+- Poll concise notifications
+- Fetch final output video
 
-### 1. 🔍 Discovery
-The Manager uses the `list_available_skills` tool to see which specialized agents are available in the `skills/` folder.
+## Solution Architecture
 
-### 2. 📦 Loading
-When a task is identified, the Manager calls `get_skill(skill_name)`. This swaps the system prompt and registers the new tools defined in that skill's `.md` file.
+```mermaid
+flowchart TD
+    A["Frontend / User"] -->|"POST /start (message + optional image)"| B["FastAPI (api/main.py)"]
+    B --> C["Job Queue (in-memory)"]
+    C --> D["Agent Manager (Agent.py)"]
 
-### 3. ✨ Execution
-The specialized agent uses its tools (e.g., `add.py`, `subtract.py`) to perform the work. These are executed as external Python scripts to keep the logic modular.
+    D --> E["scriptwriter_agent"]
+    D --> F["storyboard_artist"]
+    D --> G["voiceover_agent"]
+    D --> H["motion_designer_agent"]
+    D --> I["video_editor_agent"]
 
-### 4. 📝 Reporting
-Once finished, the Specialist calls `reset_to_manager(work_summary, next_steps)`. The Manager then reads the scratchpad to decide whether to continue with further steps or conclude the task.
+    E --> J["tools/scraper.py + save_script.py"]
+    F --> K["tools/generate_storyboard_image.py"]
+    G --> L["tools/generate_voiceover.py"]
+    H --> M["tools/generate_video_veo.py"]
+    I --> N["tools/generate_voiceover.py (merge)"]
 
----
+    J --> O["script.json"]
+    K --> P["generated_frames/"]
+    L --> Q["generated_audio/"]
+    M --> R["generated_videos/"]
+    N --> S["output.mp4"]
 
-## 📁 Project Structure
+    B --> T["GET /notifications/{job_id}"]
+    B --> U["GET /jobs/{job_id}"]
+    B --> V["GET /result/{job_id}"]
 
-- `Agent.py`: The core agent implementation (Manager + Specialist logic).
-- `memory.py`: Logic for the persistent scratchpad system.
-- `skills/`: Markdown files defining specialized agents (e.g., `math_agent.md`).
-- `tools/`: Python scripts that function as agent tools (e.g., `add.py`).
-- `memory.json`: (Auto-generated) Persistent record of steps and handovers.
-
----
-
-## 🚀 Getting Started
-
-### 🏗️ Prerequisites
-- Python 3.12+
-- `google-genai` SDK
-- A valid **Vertex AI** project or **Gemini API Key**.
-
-### ⚙️ Configuration
-Create a `.env` file with your credentials:
-```env
-VITE_VERTEX_API_KEY="your_api_key_or_token"
-VITE_GOOGLE_CLOUD_PROJECT="your_project_id"
-VITE_GOOGLE_CLOUD_LOCATION="us-central1"
+    B --> W["Archive job outputs -> job_runs/<timestamp>_<jobid>/"]
+    W --> X["input/ + artifacts/ + result/ + manifest.json"]
 ```
 
-### ▶️ Running the Agent
-```bash
-uv run Agent.py
+## Modes
+
+### Real Mode (`DRY_RUN=0`)
+- Runs real agent + tools.
+- Uses configured model credentials.
+- Produces actual generated outputs.
+
+### Dry Mode (`DRY_RUN=1`)
+- No model/tool API calls.
+- Replays sample assets from `samples/dry_run`.
+- Useful for frontend testing without credit usage.
+
+## API Overview
+
+Base service: `api/main.py`
+
+Endpoints:
+- `POST /start`
+- `GET /notifications/{job_id}?after=<seq>`
+- `GET /jobs/{job_id}`
+- `GET /result/{job_id}`
+- `GET /health`
+
+Detailed API contract is documented in:
+- `api/README.md`
+
+## Project Structure (Important)
+
+- `Agent.py` - Manager + skill orchestration
+- `skills/*.md` - Specialist definitions
+- `tools/*.py` - Tool implementations
+- `api/main.py` - HTTP API
+- `samples/dry_run/` - Offline dry-run dataset
+- `job_runs/` - Archived output bundles per completed job
+- `cleanup.py` - Cleanup utility
+
+## Required Environment Keys
+
+Create `.env` from `.env.example`.
+
+Required for real generation:
+- `VITE_VERTEX_API_KEY`
+- `VITE_GOOGLE_CLOUD_PROJECT`
+- `VITE_GOOGLE_CLOUD_LOCATION`
+
+Runtime/API keys:
+- `DRY_RUN`
+- `CLEAN_AFTER_ARCHIVE`
+- `NOTIFICATION_INTERVAL_SECONDS`
+- `REAL_MEMORY_POLL_SECONDS`
+- `API_HOST`
+- `API_PORT`
+- `API_RELOAD`
+
+Optional model overrides:
+- `VITE_GOOGLE_GENAI_USE_VERTEXAI`
+- `VITE_GEMINI_VOICE_MODEL_AUDIO`
+- `VITE_GEMINI_VISION_MODEL`
+
+## Setup and Run
+
+### Recommended (Windows)
+
+Use:
+
+```bat
+run_all.bat
 ```
 
----
+What it does:
+1. Verifies `uv` is installed
+2. Creates `.env` from `.env.example` if missing
+3. Runs `uv sync`
+4. Ensures runtime folders exist
+5. Starts API (`uv run api/main.py` via `cd api` + `uv run main.py`)
 
-## 🎯 Example Flow
-**User**: *"Add 123 and 456"*
-1. **Manager**: Detects math task → loads `math_agent`.
-2. **Specialist (`math_agent`)**: Calls `add.py` tool.
-3. **Tool (`add.py`)**: Returns `579.0`.
-4. **Specialist**: Reports result to Manager → calls `reset_to_manager`.
-5. **Manager**: Sees task complete → Informs user.
+### Manual
+
+```powershell
+# from project root
+uv sync
+copy .env.example .env  # first time only
+
+# edit .env, then:
+cd api
+uv run main.py
+```
+
+## Frontend Polling Sequence
+
+1. `POST /start` with `message` and optional `image`
+2. Poll `GET /notifications/{job_id}?after=<last_seq>`
+3. Poll `GET /jobs/{job_id}` until `status=completed`
+4. Fetch video from `GET /result/{job_id}`
+
+## Cleanup
+
+To remove generated/archived outputs and keep repo clean:
+
+```powershell
+python cleanup.py
+```
+
+Dry-check cleanup first:
+
+```powershell
+python cleanup.py --dry-run
+```
+
+## Operational Recovery Rule
+
+If context/memory is reset, bootstrap from docs in this order:
+1. `README.md` (this file)
+2. `api/README.md` (full API behavior)
+3. `.env.example` (required keys and defaults)
+4. `run_all.bat` (setup/run path)
+
+## Technical Depth & Architecture
+
+- Multi-agent orchestration pattern: Manager delegates to specialist skills (`scriptwriter`, `storyboard`, `voiceover`, `motion`, `video_editor`) with explicit handoff and memory-backed step tracking.
+- Tool isolation and execution boundary: skills call standalone Python tools via subprocess, keeping generation, media operations, and orchestration decoupled and replaceable.
+- API-first runtime: FastAPI layer abstracts orchestration into async job APIs (`/start`, `/notifications`, `/jobs`, `/result`) for frontend consumption.
+- Dual execution modes: real mode for production generation and sample-driven dry mode (`DRY_RUN=1`) for zero-credit integration testing.
+- Deterministic output governance: per-job archive bundles (`job_runs/<timestamp>_<jobid>`) with `input/`, `artifacts/`, `result/`, and `manifest.json` for auditability and reproducibility.
+- Notification architecture: short state emissions from memory/tool milestones plus configurable heartbeat interval for predictable frontend progress UX.
+
+## Real Business Impact
+
+- Faster newsroom turnaround: transforms article-to-video from manual multi-step editing into an API-triggered automated pipeline.
+- Lower production bottlenecks: standardizes script, frame, voice, motion, and assembly flow to reduce dependence on sequential manual handoffs.
+- Scalable content throughput: job-based API enables queue-driven integration with web/mobile publishing workflows.
+- Better product reliability: dry-run replay enables frontend and QA validation without burning model credits.
+- Operational traceability: archived job artifacts simplify debugging, compliance review, and postmortem analysis.
+- Cost control levers: configurable dry-run mode, cleanup strategy, and reusable sample assets reduce test-cycle spend.
+
+## Innovation
+
+- Hybrid creative + deterministic pipeline: combines generative media stages with strict structural constraints (scene counts, durations, output contracts).
+- Style-in-the-loop API interface: single message + optional reference image enables guided visual consistency without custom frontend logic.
+- Production-like simulation mode: sample replay mimics real pipeline outputs and notifications, enabling realistic environment testing before model calls.
+- Built-in lifecycle management: automatic archiving and optional workspace cleanup turn generated assets into manageable, auditable run artifacts.
+- Extensible specialist model: new capabilities can be added by dropping markdown skills and tool scripts without rewriting the API surface.

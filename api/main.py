@@ -37,6 +37,22 @@ DRY_RUN = str(_dry).strip() == "1"
 _clean = os.getenv("CLEAN_AFTER_ARCHIVE", "1")
 CLEAN_AFTER_ARCHIVE = str(_clean).strip() == "1"
 
+_notif = os.getenv("NOTIFICATION_INTERVAL_SECONDS", "10")
+try:
+    DEFAULT_NOTIFICATION_INTERVAL_SECONDS = float(_notif)
+except ValueError:
+    DEFAULT_NOTIFICATION_INTERVAL_SECONDS = 10.0
+if DEFAULT_NOTIFICATION_INTERVAL_SECONDS <= 0:
+    DEFAULT_NOTIFICATION_INTERVAL_SECONDS = 10.0
+
+_poll = os.getenv("REAL_MEMORY_POLL_SECONDS", "1")
+try:
+    REAL_MEMORY_POLL_SECONDS = float(_poll)
+except ValueError:
+    REAL_MEMORY_POLL_SECONDS = 1.0
+if REAL_MEMORY_POLL_SECONDS <= 0:
+    REAL_MEMORY_POLL_SECONDS = 1.0
+
 UPLOADS_DIR = BASE_DIR / "uploads"
 UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -68,6 +84,7 @@ class Job(BaseModel):
     image_path: Optional[Path] = None
     result_path: Optional[Path] = None
     archive_dir: Optional[Path] = None
+    notification_interval_seconds: float = DEFAULT_NOTIFICATION_INTERVAL_SECONDS
     agent_response: Optional[str] = None
     notifications: List[Notification] = Field(default_factory=list)
     error: Optional[str] = None
@@ -410,9 +427,12 @@ def _finalize_success(job_id: str, response_text: str, final_video: Path) -> Non
 
 
 async def _simulate_job(job_id: str) -> None:
+    job = _get_job(job_id)
+    interval = job.notification_interval_seconds
+
     for phase in _load_sample_notifications():
         _push(job_id, phase)
-        await asyncio.sleep(0.2)
+        await asyncio.sleep(interval)
 
     final_video = _materialize_dry_run_sample()
     _finalize_success(job_id, "Dry run sample replay complete", final_video)
@@ -435,9 +455,16 @@ async def _run_job(job_id: str) -> None:
         query = _build_query(job.message, job.image_path)
         task = asyncio.create_task(asyncio.to_thread(_run_agent, query))
 
+        heartbeat_every = job.notification_interval_seconds
+        next_heartbeat = asyncio.get_running_loop().time() + heartbeat_every
+
         while not task.done():
             _pump_memory(job_id, seen_ids, seen_status)
-            await asyncio.sleep(1.0)
+            now = asyncio.get_running_loop().time()
+            if now >= next_heartbeat:
+                _push(job_id, "Pipeline running")
+                next_heartbeat = now + heartbeat_every
+            await asyncio.sleep(REAL_MEMORY_POLL_SECONDS)
 
         response_text = await task
         _pump_memory(job_id, seen_ids, seen_status)
@@ -468,11 +495,19 @@ async def start_job(
     background_tasks: BackgroundTasks,
     message: str = Form(..., description="Main instruction including style details"),
     image: Optional[UploadFile] = File(None, description="Optional reference image"),
+    notification_interval_seconds: Optional[float] = Form(None, description="Notification interval in seconds (default 10)"),
 ):
     with lock:
         active = any(j.status in (JobStatus.queued, JobStatus.running) for j in jobs.values())
     if active:
         raise HTTPException(status_code=409, detail="Another job is already running")
+
+    if notification_interval_seconds is None:
+        effective_interval = DEFAULT_NOTIFICATION_INTERVAL_SECONDS
+    else:
+        if notification_interval_seconds <= 0:
+            raise HTTPException(status_code=422, detail="notification_interval_seconds must be > 0")
+        effective_interval = float(notification_interval_seconds)
 
     job_id = str(uuid.uuid4())
     image_path = _save_upload(job_id, image) if image else None
@@ -482,6 +517,7 @@ async def start_job(
         status=JobStatus.queued,
         message=message,
         image_path=image_path,
+        notification_interval_seconds=effective_interval,
     )
     _save_job(job)
     _push(job_id, "Job queued")
@@ -501,6 +537,7 @@ async def get_job(job_id: str):
         "has_result": job.result_path is not None,
         "result_path": str(job.result_path) if job.result_path else None,
         "archive_dir": str(job.archive_dir) if job.archive_dir else None,
+        "notification_interval_seconds": job.notification_interval_seconds,
         "result_endpoint": f"/result/{job.id}" if job.result_path else None,
         "agent_response": job.agent_response,
         "error": job.error,
@@ -531,6 +568,8 @@ async def health():
         "status": "ok",
         "dry_run": DRY_RUN,
         "clean_after_archive": CLEAN_AFTER_ARCHIVE,
+        "default_notification_interval_seconds": DEFAULT_NOTIFICATION_INTERVAL_SECONDS,
+        "real_memory_poll_seconds": REAL_MEMORY_POLL_SECONDS,
         "dry_run_sample_dir": str(SAMPLE_DRY_RUN_DIR),
     }
 
@@ -547,3 +586,19 @@ if __name__ == "__main__":
         uvicorn.run(target, host=host, port=port, reload=True)
     else:
         uvicorn.run(app, host=host, port=port, reload=False)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -16,13 +16,21 @@ import uuid
 from enum import Enum
 from pathlib import Path
 from typing import Dict, List, Optional
+from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 
 from dotenv import load_dotenv
 from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 load_dotenv()
+
+# On Windows, Proactor can emit noisy ConnectionResetError logs when
+# clients close a streamed response early (common with HTML5 video range requests).
+if os.name == "nt" and hasattr(asyncio, "WindowsSelectorEventLoopPolicy"):
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 if str(BASE_DIR) not in sys.path:
@@ -94,6 +102,20 @@ jobs: Dict[str, Job] = {}
 lock = threading.Lock()
 
 app = FastAPI(title="ET Agent API", version="0.5.0")
+
+_cors_origins_raw = os.getenv(
+    "CORS_ALLOW_ORIGINS",
+    "http://localhost:5173,http://127.0.0.1:5173,http://localhost:8080,http://127.0.0.1:8080",
+)
+CORS_ALLOW_ORIGINS = [o.strip() for o in _cors_origins_raw.split(",") if o.strip()]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=CORS_ALLOW_ORIGINS or ["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 def _get_job(job_id: str) -> Job:
@@ -490,11 +512,50 @@ def _save_upload(job_id: str, image: UploadFile) -> Path:
     return out.resolve()
 
 
+def _guess_image_suffix(image_url: str, content_type: str) -> str:
+    ext = Path(urlparse(image_url).path).suffix.lower()
+    if ext in {".jpg", ".jpeg", ".png", ".webp", ".gif"}:
+        return ".jpg" if ext == ".jpeg" else ext
+
+    content_type = content_type.lower().split(";")[0].strip()
+    by_type = {
+        "image/jpeg": ".jpg",
+        "image/jpg": ".jpg",
+        "image/png": ".png",
+        "image/webp": ".webp",
+        "image/gif": ".gif",
+    }
+    return by_type.get(content_type, ".jpg")
+
+
+def _save_upload_from_url(job_id: str, image_url: str) -> Path:
+    parsed = urlparse(image_url)
+    if parsed.scheme not in {"http", "https"}:
+        raise HTTPException(status_code=422, detail="image_url must be an http/https URL")
+
+    try:
+        req = Request(image_url, headers={"User-Agent": "ET-Agent/1.0"})
+        with urlopen(req, timeout=20) as resp:
+            content_type = resp.headers.get("Content-Type", "")
+            data = resp.read()
+    except Exception:
+        raise HTTPException(status_code=422, detail="Failed to download image_url")
+
+    if not data:
+        raise HTTPException(status_code=422, detail="Downloaded image_url is empty")
+
+    suffix = _guess_image_suffix(image_url, content_type)
+    out = UPLOADS_DIR / f"{job_id}{suffix}"
+    out.write_bytes(data)
+    return out.resolve()
+
+
 @app.post("/start")
 async def start_job(
     background_tasks: BackgroundTasks,
     message: str = Form(..., description="Main instruction including style details"),
     image: Optional[UploadFile] = File(None, description="Optional reference image"),
+    image_url: Optional[str] = Form(None, description="Optional reference image URL"),
     notification_interval_seconds: Optional[float] = Form(None, description="Notification interval in seconds (default 10)"),
 ):
     with lock:
@@ -510,7 +571,11 @@ async def start_job(
         effective_interval = float(notification_interval_seconds)
 
     job_id = str(uuid.uuid4())
-    image_path = _save_upload(job_id, image) if image else None
+    image_path = None
+    if image:
+        image_path = _save_upload(job_id, image)
+    elif image_url:
+        image_path = _save_upload_from_url(job_id, image_url)
 
     job = Job(
         id=job_id,

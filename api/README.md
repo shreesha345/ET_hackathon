@@ -37,6 +37,9 @@ Set in `D:\Coding\ET_agent\.env`.
 - `API_HOST` (default `0.0.0.0`)
 - `API_PORT` (default `8000`)
 - `API_RELOAD=0|1` (default `0`)
+- `CORS_ALLOW_ORIGINS`
+  - comma-separated allowed frontend origins
+  - default: `http://localhost:5173,http://127.0.0.1:5173,http://localhost:8080,http://127.0.0.1:8080`
 
 ## Input Contract (`POST /start`)
 
@@ -45,6 +48,8 @@ Only two primary inputs are required by design:
   - include article URL + style instruction text in this field
 - `image` (optional)
   - style/reference image upload
+- `image_url` (optional)
+  - style/reference image URL (used when a built-in style thumbnail is selected)
 
 Optional testing input:
 - `notification_interval_seconds` (optional, `> 0`)

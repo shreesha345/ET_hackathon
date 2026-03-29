@@ -7,9 +7,11 @@ interface CustomStyle {
   name: string;
   src: string;
   isCustom: true;
+  file: File;
 }
 
 type StyleItem = { name: string; src: string } | CustomStyle;
+export type SelectedStyle = { name: string; src: string; file?: File | null };
 
 const styles = [
   { name: "2D Line", src: "https://prod-ao-ext.cdn.opus.pro/story-mode/styles/2d%20line.webp" },
@@ -29,13 +31,25 @@ const styles = [
   { name: "Economic", src: "https://prod-ao-ext.cdn.opus.pro/story-mode/styles/Economic.webp" },
 ];
 
-export const StylePicker = ({ onHoverChange, onStyleSelect }: { onHoverChange?: (isHovering: boolean) => void; onStyleSelect?: (style: string | null) => void }) => {
+export const StylePicker = ({
+  onHoverChange,
+  onStyleSelect,
+}: {
+  onHoverChange?: (isHovering: boolean) => void;
+  onStyleSelect?: (style: SelectedStyle | null) => void;
+}) => {
   const [hoveredStyle, setHoveredStyle] = useState<string | null>(null);
-  const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
+  const [hoverPreviewLeft, setHoverPreviewLeft] = useState<number | null>(null);
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
   const [customStyles, setCustomStyles] = useState<CustomStyle[]>([]);
   const buttonRefs = useRef<(HTMLButtonElement | null)[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const isDraggingRef = useRef(false);
+  const hasDraggedRef = useRef(false);
+  const dragStartXRef = useRef(0);
+  const dragStartScrollLeftRef = useRef(0);
 
   const allStyles: StyleItem[] = [...styles, ...customStyles];
 
@@ -47,8 +61,13 @@ export const StylePicker = ({ onHoverChange, onStyleSelect }: { onHoverChange?: 
         name: `Custom ${customStyles.length + 1}`,
         src: url,
         isCustom: true,
+        file,
       };
-      setCustomStyles(prev => [...prev, newStyle]);
+      const nextCustomStyles = [...customStyles, newStyle];
+      const nextIndex = styles.length + nextCustomStyles.length - 1;
+      setCustomStyles(nextCustomStyles);
+      setSelectedIndex(nextIndex);
+      onStyleSelect?.({ name: newStyle.name, src: newStyle.src, file: newStyle.file });
     }
     // Reset input so same file can be selected again
     if (fileInputRef.current) {
@@ -56,50 +75,99 @@ export const StylePicker = ({ onHoverChange, onStyleSelect }: { onHoverChange?: 
     }
   };
 
+  const handleMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (e.button !== 0) {
+      return;
+    }
+    const container = scrollContainerRef.current;
+    if (!container) {
+      return;
+    }
+    e.preventDefault();
+    isDraggingRef.current = true;
+    hasDraggedRef.current = false;
+    dragStartXRef.current = e.clientX;
+    dragStartScrollLeftRef.current = container.scrollLeft;
+  };
+
+  const handleMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
+    const container = scrollContainerRef.current;
+    if (!container || !isDraggingRef.current) {
+      return;
+    }
+    e.preventDefault();
+    const deltaX = e.clientX - dragStartXRef.current;
+    if (Math.abs(deltaX) > 4) {
+      hasDraggedRef.current = true;
+    }
+    container.scrollLeft = dragStartScrollLeftRef.current - deltaX;
+  };
+
+  const stopDragging = () => {
+    isDraggingRef.current = false;
+  };
+
+  const updateHoverPreviewPosition = (target: HTMLButtonElement) => {
+    const root = rootRef.current;
+    if (!root) {
+      return;
+    }
+    const rootRect = root.getBoundingClientRect();
+    const targetRect = target.getBoundingClientRect();
+    setHoverPreviewLeft(targetRect.left - rootRect.left + (targetRect.width / 2));
+  };
+
   return (
-    <div className="space-y-1">
-      <p className="text-[11px] text-muted-foreground">Scroll to see more</p>
-      <div className="w-full max-w-[460px] overflow-x-visible overflow-y-visible pr-14 scrollbar-hide cursor-grab relative">
-        {hoveredStyle && hoveredIndex !== null && (
+    <div className="w-full max-w-[980px] mx-auto">
+      <div ref={rootRef} className="relative w-full overflow-x-visible overflow-y-visible cursor-grab select-none">
+        <div className="pointer-events-none absolute left-0 top-0 z-20 h-full w-10 bg-gradient-to-r from-black to-transparent" />
+        <div className="pointer-events-none absolute right-0 top-0 z-20 h-full w-10 bg-gradient-to-l from-black to-transparent" />
+        {hoveredStyle && hoverPreviewLeft !== null && (
           <div
             className="absolute z-50 pointer-events-none"
             style={{
-              left: `${(buttonRefs.current[hoveredIndex]?.offsetLeft ?? 0) + 35}px`,
+              left: `${hoverPreviewLeft}px`,
               transform: 'translateX(-50%)',
-              top: '-150px',
+              top: '-166px',
             }}
           >
-            <div className="rounded-sm overflow-hidden border border-muted-foreground/20 shadow-lg">
-              <video
-                className="size-32 rounded-sm object-cover"
-                loop
-                playsInline
-                poster={hoveredStyle}
-                preload="auto"
-                src={hoveredStyle.replace(/\.(webp|png)$/, '.webm')}
+            <div className="rounded-lg overflow-hidden border border-muted-foreground/40 shadow-2xl bg-black/30 backdrop-blur-md">
+              <img
+                className="h-[130px] w-[96px] rounded-lg object-cover"
+                src={hoveredStyle}
+                alt="Style preview"
+                draggable={false}
               />
             </div>
           </div>
         )}
-        <div className="overflow-x-auto overflow-y-hidden scrollbar-hide">
-          <div className="flex items-start gap-4">
+        <div
+          ref={scrollContainerRef}
+          className="style-picker-track w-full overflow-x-auto overflow-y-hidden cursor-grab active:cursor-grabbing px-2"
+          style={{ scrollbarWidth: "none", msOverflowStyle: "none" }}
+          onMouseDown={handleMouseDown}
+          onMouseMove={handleMouseMove}
+          onMouseUp={stopDragging}
+          onMouseLeave={stopDragging}
+        >
+          <div className="flex items-start gap-6 min-w-max py-1">
             {/* Add style button */}
             <button
-              className="flex w-[70px] shrink-0 flex-col items-center gap-1.5 group"
+              className="flex w-[84px] shrink-0 flex-col items-center gap-2 group"
               type="button"
               onClick={() => fileInputRef.current?.click()}
             >
-              <div className="flex h-[68px] w-[50px] items-center justify-center rounded-sm border-2 border-white/[0.15] bg-white/[0.03] hover:bg-white/[0.06] transition-colors">
-                <Plus className="w-4.5 h-4.5 text-secondary" />
+              <div className="flex h-[82px] w-[62px] items-center justify-center rounded-xl border-2 border-white/25 bg-white/[0.06] hover:bg-white/[0.1] transition-colors">
+                <Plus className="w-4.5 h-4.5 text-white/80" />
               </div>
-              <span className="text-secondary line-clamp-2 max-w-[70px] text-center text-xs font-medium leading-[15px]">
+              <span className="text-white/80 line-clamp-2 max-w-[84px] text-center text-sm font-medium leading-[16px]">
                 Add style
               </span>
             </button>
 
             {/* Divider */}
-            <div className="flex h-[68px] shrink-0 items-center justify-center px-1">
-              <div className="h-8 w-px shrink-0 bg-white/20"></div>
+            <div className="flex h-[82px] shrink-0 items-center justify-center px-0">
+              <div className="h-10 w-px shrink-0 bg-white/20"></div>
             </div>
 
             {/* Hidden file input */}
@@ -115,27 +183,41 @@ export const StylePicker = ({ onHoverChange, onStyleSelect }: { onHoverChange?: 
               <button
                 key={style.name}
                 ref={(el) => (buttonRefs.current[index] = el)}
-                className={`flex w-[70px] shrink-0 flex-col items-center gap-1.5 group transition-all ${
+                className={`flex w-[84px] shrink-0 flex-col items-center gap-2 group transition-all ${
                   selectedIndex === index ? "opacity-100" : ""
                 }`}
                 type="button"
+                draggable={false}
                 onClick={() => {
-                  setSelectedIndex(selectedIndex === index ? null : index);
-                  onStyleSelect?.(selectedIndex === index ? null : style.src);
+                  if (hasDraggedRef.current) {
+                    hasDraggedRef.current = false;
+                    return;
+                  }
+                  const isDeselect = selectedIndex === index;
+                  setSelectedIndex(isDeselect ? null : index);
+                  if (isDeselect) {
+                    onStyleSelect?.(null);
+                    return;
+                  }
+                  onStyleSelect?.({
+                    name: style.name,
+                    src: style.src,
+                    file: "file" in style ? style.file : null,
+                  });
                 }}
-                onMouseEnter={() => {
+                onMouseEnter={(e) => {
+                  updateHoverPreviewPosition(e.currentTarget);
                   setHoveredStyle(style.src);
-                  setHoveredIndex(index);
                   onHoverChange?.(true);
                 }}
                 onMouseLeave={() => {
                   setHoveredStyle(null);
-                  setHoveredIndex(null);
+                  setHoverPreviewLeft(null);
                   onHoverChange?.(false);
                 }}
               >
                 <div
-                  className={`h-[68px] w-[50px] overflow-hidden rounded-sm transition-all duration-200 hover:opacity-35 border-2 ${
+                  className={`h-[82px] w-[62px] overflow-hidden rounded-xl transition-all duration-200 hover:opacity-35 border-2 ${
                     selectedIndex === index
                       ? "border-foreground"
                       : "border-transparent"
@@ -145,9 +227,10 @@ export const StylePicker = ({ onHoverChange, onStyleSelect }: { onHoverChange?: 
                     alt={style.name}
                     className="size-full rounded-sm object-cover"
                     src={style.src}
+                    draggable={false}
                   />
                 </div>
-                <span className="text-secondary line-clamp-2 max-w-[70px] overflow-hidden text-center text-xs font-medium leading-[15px]">
+                <span className="text-white/75 group-hover:text-white line-clamp-2 max-w-[84px] overflow-hidden text-center text-sm font-medium leading-[16px]">
                   {style.name}
                 </span>
               </button>
@@ -155,6 +238,13 @@ export const StylePicker = ({ onHoverChange, onStyleSelect }: { onHoverChange?: 
           </div>
         </div>
       </div>
+      <style>{`
+        .style-picker-track::-webkit-scrollbar {
+          display: none;
+          width: 0;
+          height: 0;
+        }
+      `}</style>
     </div>
   );
 };

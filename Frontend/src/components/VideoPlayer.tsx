@@ -10,15 +10,20 @@ import {
   Pause,
   X,
 } from "lucide-react";
-import mockVideo from "@/assets/output.mp4";
 
 interface VideoPlayerProps {
+  videoUrl: string;
   onClose?: () => void;
   inline?: boolean;
   aspectRatio?: "16:9" | "9:16";
 }
 
-export const VideoPlayer = ({ onClose, inline = false, aspectRatio = "16:9" }: VideoPlayerProps) => {
+export const VideoPlayer = ({
+  videoUrl,
+  onClose,
+  inline = false,
+  aspectRatio = "16:9",
+}: VideoPlayerProps) => {
   const [isPlaying, setIsPlaying] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [volume, setVolume] = useState(0.8);
@@ -144,7 +149,7 @@ export const VideoPlayer = ({ onClose, inline = false, aspectRatio = "16:9" }: V
 
   const handleDownload = async () => {
     try {
-      const response = await fetch(mockVideo);
+      const response = await fetch(videoUrl);
       const blob = await response.blob();
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement("a");
@@ -165,11 +170,11 @@ export const VideoPlayer = ({ onClose, inline = false, aspectRatio = "16:9" }: V
         await navigator.share({
           title: "Generated Video",
           text: "Check out this video I created with ET NewsStudio!",
-          url: window.location.href,
+          url: videoUrl,
         });
       } else {
-        await navigator.clipboard.writeText(window.location.href);
-        alert("Link copied to clipboard!");
+        await navigator.clipboard.writeText(videoUrl);
+        alert("Video link copied to clipboard");
       }
     } catch (error) {
       console.error("Share failed:", error);
@@ -199,7 +204,7 @@ export const VideoPlayer = ({ onClose, inline = false, aspectRatio = "16:9" }: V
       >
         <video
           ref={videoRef}
-          src={mockVideo}
+          src={videoUrl}
           className="w-full h-full object-contain"
           onClick={togglePlay}
         />

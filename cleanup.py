@@ -28,7 +28,6 @@ ALLOW_DIRS = [
     "generated_audio",
     "generated_videos",
     "temp_merges",
-    "extra",
     "job_runs",
 ]
 

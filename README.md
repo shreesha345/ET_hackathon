@@ -115,32 +115,63 @@ Optional model overrides:
 
 ## Setup and Run
 
-### Recommended (Windows)
+### Prerequisites
 
-Use:
+- `uv` installed (Python dependency manager)
+- Node.js + npm installed (for frontend)
+
+### 1) Configure Environment (project root)
+
+```powershell
+copy .env.example .env  # first time only
+```
+
+Then edit `.env`:
+- Keep `VITE_API_BASE_URL=http://127.0.0.1:8000`
+- Use `DRY_RUN=1` for frontend/API testing without model credits
+- Use `DRY_RUN=0` for real generation
+
+### 2) Run Backend API
+
+Option A (Windows helper script):
 
 ```bat
 run_all.bat
 ```
 
-What it does:
+What `run_all.bat` does:
 1. Verifies `uv` is installed
 2. Creates `.env` from `.env.example` if missing
 3. Runs `uv sync`
 4. Ensures runtime folders exist
-5. Starts API (`uv run api/main.py` via `cd api` + `uv run main.py`)
+5. Starts API (`uv run main.py` from `api/`)
 
-### Manual
+Option B (manual):
 
 ```powershell
 # from project root
 uv sync
-copy .env.example .env  # first time only
-
-# edit .env, then:
 cd api
 uv run main.py
 ```
+
+Backend default URL: `http://127.0.0.1:8000` (or `http://localhost:8000`)
+
+### 3) Run Frontend (second terminal)
+
+```powershell
+cd Frontend
+npm install
+npm run dev
+```
+
+Frontend default URL: `http://localhost:5173`
+
+### 4) Verify End-to-End
+
+1. Open `http://localhost:5173`
+2. Submit a prompt (and optional reference image)
+3. Frontend calls API at `VITE_API_BASE_URL` (default `http://127.0.0.1:8000`)
 
 ## Frontend Polling Sequence
 

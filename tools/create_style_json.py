@@ -15,15 +15,24 @@ Outputs:
 import os
 import sys
 import json
-import base64
-from pathlib import Path
 from dotenv import load_dotenv
-from PIL import Image
 
 load_dotenv()
 
 # Style directory location
 STYLES_DIR = os.path.join(os.path.dirname(__file__), "styles")
+
+def _guess_image_mime_type(image_path: str) -> str:
+    ext = os.path.splitext(image_path)[1].lower()
+    if ext in {".jpg", ".jpeg"}:
+        return "image/jpeg"
+    if ext == ".png":
+        return "image/png"
+    if ext == ".webp":
+        return "image/webp"
+    if ext == ".gif":
+        return "image/gif"
+    return "image/jpeg"
 
 def analyze_and_create_style(style_name: str, description: str, image_path: str = None) -> dict:
     from google import genai
@@ -107,7 +116,7 @@ def analyze_and_create_style(style_name: str, description: str, image_path: str 
             with open(image_path, "rb") as f:
                 img_data = f.read()
             contents.append(
-                types.Part.from_bytes(data=img_data, mime_type="image/jpeg")
+                types.Part.from_bytes(data=img_data, mime_type=_guess_image_mime_type(image_path))
             )
         except Exception as e:
             return {"success": False, "error": f"Failed to read image: {e}"}

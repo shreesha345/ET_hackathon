@@ -12,6 +12,7 @@ export interface ApiNotification {
 
 export interface StartJobInput {
   message: string;
+  styleName?: string | null;
   imageFile?: File | null;
   imageUrl?: string | null;
   notificationIntervalSeconds?: number;
@@ -26,6 +27,8 @@ export interface JobResponse {
   id: string;
   status: JobStatus;
   message: string;
+  selected_style_name: string | null;
+  generated_style_name: string | null;
   image_path: string | null;
   has_result: boolean;
   result_path: string | null;
@@ -33,6 +36,8 @@ export interface JobResponse {
   notification_interval_seconds: number;
   result_endpoint: string | null;
   agent_response: string | null;
+  langfuse_trace_id: string | null;
+  langfuse_trace_url: string | null;
   error: string | null;
 }
 
@@ -74,6 +79,9 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
 export async function startJob(input: StartJobInput): Promise<StartJobResponse> {
   const body = new FormData();
   body.append("message", input.message);
+  if (input.styleName) {
+    body.append("style_name", input.styleName);
+  }
   if (input.imageFile) {
     body.append("image", input.imageFile);
   }

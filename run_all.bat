@@ -36,8 +36,11 @@ if not exist "generated_videos" mkdir "generated_videos"
 if not exist "job_runs" mkdir "job_runs"
 if not exist "uploads" mkdir "uploads"
 
-echo [5/5] Starting API server...
-cd api
-uv run main.py
+echo [5/5] Starting servers...
+
+start "API Server" cmd /k "cd /d "%~dp0api" && uv run main.py"
+start "Frontend Dev" cmd /k "cd /d "%~dp0frontend" && yarn run dev"
+
+echo Both servers launched in separate windows.
 
 endlocal

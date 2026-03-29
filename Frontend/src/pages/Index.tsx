@@ -42,6 +42,7 @@ const Index = () => {
     try {
       const started = await startJob({
         message: finalMessage,
+        styleName: selectedStyle?.name ?? null,
         imageFile: selectedStyle?.file ?? null,
         imageUrl: selectedStyle && !selectedStyle.file ? selectedStyle.src : null,
       });

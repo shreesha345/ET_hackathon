@@ -5,6 +5,7 @@ API server that runs Agent.py and exposes job progress for frontend polling.
 from __future__ import annotations
 
 import asyncio
+from contextlib import nullcontext
 from datetime import datetime
 import json
 import os
@@ -24,6 +25,11 @@ from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadF
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
+
+try:
+    from langfuse import get_client
+except Exception:  # pragma: no cover - optional dependency at runtime
+    get_client = None  # type: ignore[assignment]
 
 load_dotenv()
 
@@ -72,6 +78,82 @@ JOB_RUNS_DIR = BASE_DIR / "job_runs"
 SAMPLE_DRY_RUN_DIR = BASE_DIR / "samples" / "dry_run"
 JOB_RUNS_DIR.mkdir(parents=True, exist_ok=True)
 
+LANGFUSE_TRACING_ENABLED = os.getenv("LANGFUSE_TRACING_ENABLED", "1").strip() != "0"
+LANGFUSE_REQUIRED_KEYS = ("LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY")
+_langfuse_client = None
+_langfuse_client_failed = False
+_langfuse_lock = threading.Lock()
+
+
+def _langfuse_is_configured() -> bool:
+    if not LANGFUSE_TRACING_ENABLED or get_client is None:
+        return False
+    return all(str(os.getenv(k, "")).strip() for k in LANGFUSE_REQUIRED_KEYS)
+
+
+def _get_langfuse_client():
+    global _langfuse_client, _langfuse_client_failed
+    if _langfuse_client_failed:
+        return None
+    if _langfuse_client is not None:
+        return _langfuse_client
+    if not _langfuse_is_configured():
+        return None
+
+    with _langfuse_lock:
+        if _langfuse_client is not None:
+            return _langfuse_client
+        if _langfuse_client_failed:
+            return None
+        try:
+            _langfuse_client = get_client()
+        except Exception:
+            _langfuse_client_failed = True
+            _langfuse_client = None
+            return None
+    return _langfuse_client
+
+
+class _NoopObservation:
+    def update(self, **_: object) -> None:
+        return
+
+
+def _langfuse_observation(name: str, **kwargs):
+    client = _get_langfuse_client()
+    if not client:
+        return nullcontext(_NoopObservation())
+    try:
+        return client.start_as_current_observation(name=name, as_type="span", **kwargs)
+    except Exception:
+        return nullcontext(_NoopObservation())
+
+
+def _langfuse_update(observation, **kwargs) -> None:
+    if observation is None:
+        return
+    try:
+        observation.update(**kwargs)
+    except Exception:
+        return
+
+
+def _langfuse_flush() -> None:
+    client = _get_langfuse_client()
+    if not client:
+        return
+    try:
+        client.flush()
+    except Exception:
+        return
+
+
+def _slugify_style_name(value: Optional[str]) -> str:
+    text = (value or "custom_style").strip().lower()
+    text = re.sub(r"[^a-z0-9]+", "_", text)
+    text = text.strip("_")
+    return text or "custom_style"
+
 
 class JobStatus(str, Enum):
     queued = "queued"
@@ -89,11 +171,15 @@ class Job(BaseModel):
     id: str
     status: JobStatus
     message: str
+    selected_style_name: Optional[str] = None
+    generated_style_name: Optional[str] = None
     image_path: Optional[Path] = None
     result_path: Optional[Path] = None
     archive_dir: Optional[Path] = None
     notification_interval_seconds: float = DEFAULT_NOTIFICATION_INTERVAL_SECONDS
     agent_response: Optional[str] = None
+    langfuse_trace_id: Optional[str] = None
+    langfuse_trace_url: Optional[str] = None
     notifications: List[Notification] = Field(default_factory=list)
     error: Optional[str] = None
 
@@ -108,10 +194,16 @@ _cors_origins_raw = os.getenv(
     "http://localhost:5173,http://127.0.0.1:5173,http://localhost:8080,http://127.0.0.1:8080",
 )
 CORS_ALLOW_ORIGINS = [o.strip() for o in _cors_origins_raw.split(",") if o.strip()]
+_cors_origin_regex = os.getenv(
+    "CORS_ALLOW_ORIGIN_REGEX",
+    r"^https?://(localhost|127\.0\.0\.1|192\.168\.\d{1,3}\.\d{1,3}|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(1[6-9]|2\d|3[0-1])\.\d{1,3}\.\d{1,3})(:\d+)?$",
+).strip()
+CORS_ALLOW_ORIGIN_REGEX = _cors_origin_regex or None
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ALLOW_ORIGINS or ["*"],
+    allow_origin_regex=CORS_ALLOW_ORIGIN_REGEX,
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -219,16 +311,38 @@ def _pump_memory(job_id: str, seen_ids: set[int], seen_status: Dict[int, str]) -
                 _push(job_id, "Step failed")
 
 
-def _build_query(message: str, image_path: Optional[Path]) -> str:
-    if not image_path:
-        return message
+def _build_query(
+    message: str,
+    image_path: Optional[Path],
+    selected_style_name: Optional[str] = None,
+    generated_style_name: Optional[str] = None,
+) -> str:
+    sections = [message]
 
-    return (
-        f"{message}\n\n"
-        f"Reference style image path: {image_path}\n"
-        "Use this image as the visual style reference for storyboard and motion; "
-        "follow the style described in the main message."
-    )
+    if selected_style_name:
+        sections.append(f"User-selected style: {selected_style_name}")
+
+    if image_path:
+        sections.append(
+            f"Reference style image path: {image_path}\n"
+            "Use this image as the visual style reference for storyboard and motion."
+        )
+
+    if generated_style_name:
+        sections.append(
+            "Generated storyboard style template name: "
+            f"{generated_style_name}\n"
+            "STYLE CREATION RULE (mandatory when reference image exists): "
+            "Before Phase 2 Storyboarding, call `run_skill` with "
+            "`skill_name='storyboard_styler'` and a query that explicitly includes "
+            "`style_name`, `image_path`, and `description`. "
+            "Example: run_skill(skill_name='storyboard_styler', query='Create style_name <name> using image_path <path> and description <desc>').\n"
+            "After style creation, pass this exact `style_name` in every "
+            "`generate_storyboard_image` call for all 8 shots.\n"
+            "Do not default to Vox-style unless the user explicitly requested Vox."
+        )
+
+    return "\n\n".join(part for part in sections if part)
 
 
 def _extract_video_path(text: str) -> Optional[Path]:
@@ -420,6 +534,10 @@ def _archive_job_outputs(job: Job) -> tuple[Path, Optional[Path]]:
         "status": job.status.value,
         "dry_run": DRY_RUN,
         "result_file": str(archived_result) if archived_result else None,
+        "selected_style_name": job.selected_style_name,
+        "generated_style_name": job.generated_style_name,
+        "langfuse_trace_id": job.langfuse_trace_id,
+        "langfuse_trace_url": job.langfuse_trace_url,
     }
     _write_json(run_dir / "manifest.json", manifest)
     return run_dir.resolve(), archived_result.resolve() if archived_result else None
@@ -466,42 +584,160 @@ async def _run_job(job_id: str) -> None:
     _save_job(job)
     _push(job_id, "Agent started")
 
-    if DRY_RUN:
-        await _simulate_job(job_id)
-        return
+    trace_input = {
+        "job_id": job.id,
+        "message": job.message,
+        "selected_style_name": job.selected_style_name,
+        "has_reference_image": bool(job.image_path),
+        "dry_run": DRY_RUN,
+    }
+    trace_metadata = {
+        "notification_interval_seconds": str(job.notification_interval_seconds),
+        "real_memory_poll_seconds": str(REAL_MEMORY_POLL_SECONDS),
+    }
 
-    seen_ids: set[int] = set()
-    seen_status: Dict[int, str] = {}
+    with _langfuse_observation(
+        "et.video_pipeline.job",
+        input=trace_input,
+        metadata=trace_metadata,
+    ) as root_observation:
+        langfuse_client = _get_langfuse_client()
+        propagation_ctx = nullcontext()
+        if langfuse_client:
+            try:
+                propagation_ctx = langfuse_client.propagate_attributes(
+                    session_id=job.id,
+                    tags=["et-agent", "video-pipeline"],
+                    trace_name="et.video_pipeline.job",
+                )
+            except Exception:
+                propagation_ctx = nullcontext()
 
-    try:
-        query = _build_query(job.message, job.image_path)
-        task = asyncio.create_task(asyncio.to_thread(_run_agent, query))
+        with propagation_ctx:
+            if langfuse_client:
+                try:
+                    trace_id = langfuse_client.get_current_trace_id()
+                    trace_url = langfuse_client.get_trace_url(trace_id=trace_id) if trace_id else None
+                    current = _get_job(job_id)
+                    current.langfuse_trace_id = trace_id
+                    current.langfuse_trace_url = trace_url
+                    _save_job(current)
+                except Exception:
+                    pass
 
-        heartbeat_every = job.notification_interval_seconds
-        next_heartbeat = asyncio.get_running_loop().time() + heartbeat_every
+            if DRY_RUN:
+                try:
+                    with _langfuse_observation(
+                        "et.video_pipeline.dry_run",
+                        input={"sample_dir": str(SAMPLE_DRY_RUN_DIR)},
+                    ) as dry_observation:
+                        await _simulate_job(job_id)
+                        _langfuse_update(dry_observation, output={"status": "completed"})
+                    final_job = _get_job(job_id)
+                    _langfuse_update(
+                        root_observation,
+                        output={
+                            "status": final_job.status.value,
+                            "result_path": str(final_job.result_path) if final_job.result_path else None,
+                        },
+                    )
+                    return
+                finally:
+                    _langfuse_flush()
 
-        while not task.done():
-            _pump_memory(job_id, seen_ids, seen_status)
-            now = asyncio.get_running_loop().time()
-            if now >= next_heartbeat:
-                _push(job_id, "Pipeline running")
-                next_heartbeat = now + heartbeat_every
-            await asyncio.sleep(REAL_MEMORY_POLL_SECONDS)
+            seen_ids: set[int] = set()
+            seen_status: Dict[int, str] = {}
 
-        response_text = await task
-        _pump_memory(job_id, seen_ids, seen_status)
+            try:
+                generated_style_name: Optional[str] = None
+                if job.image_path:
+                    _push(job_id, "Styler planning")
+                    generated_style_name = f"{_slugify_style_name(job.selected_style_name)}_{job.id[:8]}"
 
-        final_video = _extract_video_path(response_text) or _resolve_final_video()
-        if not final_video:
-            raise FileNotFoundError("Final mp4 not found after pipeline completion")
+                    with _langfuse_observation(
+                        "et.video_pipeline.style_profile",
+                        input={
+                            "selected_style_name": job.selected_style_name,
+                            "reference_image": str(job.image_path),
+                        },
+                    ) as style_observation:
+                        _langfuse_update(
+                            style_observation,
+                            output={
+                                "generated_style_name": generated_style_name,
+                                "style_creation_mode": "storyboard_styler_skill",
+                            },
+                        )
 
-        _finalize_success(job_id, response_text, final_video)
-    except Exception as exc:
-        job = _get_job(job_id)
-        job.status = JobStatus.failed
-        job.error = str(exc)
-        _save_job(job)
-        _push(job_id, "Job failed")
+                    job = _get_job(job_id)
+                    job.generated_style_name = generated_style_name
+                    _save_job(job)
+
+                query = _build_query(
+                    message=job.message,
+                    image_path=job.image_path,
+                    selected_style_name=job.selected_style_name,
+                    generated_style_name=generated_style_name,
+                )
+
+                with _langfuse_observation(
+                    "et.video_pipeline.agent_run",
+                    input={"query": query[:4000]},
+                    metadata={"agent_model": "gemini-3-flash-preview"},
+                ) as agent_observation:
+                    task = asyncio.create_task(asyncio.to_thread(_run_agent, query))
+
+                    heartbeat_every = job.notification_interval_seconds
+                    next_heartbeat = asyncio.get_running_loop().time() + heartbeat_every
+
+                    while not task.done():
+                        _pump_memory(job_id, seen_ids, seen_status)
+                        now = asyncio.get_running_loop().time()
+                        if now >= next_heartbeat:
+                            _push(job_id, "Pipeline running")
+                            next_heartbeat = now + heartbeat_every
+                        await asyncio.sleep(REAL_MEMORY_POLL_SECONDS)
+
+                    response_text = await task
+                    _langfuse_update(
+                        agent_observation,
+                        output={"response_preview": response_text[:1500]},
+                    )
+
+                _pump_memory(job_id, seen_ids, seen_status)
+
+                final_video = _extract_video_path(response_text) or _resolve_final_video()
+                if not final_video:
+                    raise FileNotFoundError("Final mp4 not found after pipeline completion")
+
+                _finalize_success(job_id, response_text, final_video)
+
+                completed = _get_job(job_id)
+                _langfuse_update(
+                    root_observation,
+                    output={
+                        "status": completed.status.value,
+                        "generated_style_name": completed.generated_style_name,
+                        "result_path": str(completed.result_path) if completed.result_path else None,
+                        "archive_dir": str(completed.archive_dir) if completed.archive_dir else None,
+                    },
+                )
+            except Exception as exc:
+                failed = _get_job(job_id)
+                failed.status = JobStatus.failed
+                failed.error = str(exc)
+                _save_job(failed)
+                _push(job_id, "Job failed")
+                _langfuse_update(
+                    root_observation,
+                    output={
+                        "status": "failed",
+                        "error": str(exc),
+                        "generated_style_name": failed.generated_style_name,
+                    },
+                )
+            finally:
+                _langfuse_flush()
 
 
 def _save_upload(job_id: str, image: UploadFile) -> Path:
@@ -554,6 +790,7 @@ def _save_upload_from_url(job_id: str, image_url: str) -> Path:
 async def start_job(
     background_tasks: BackgroundTasks,
     message: str = Form(..., description="Main instruction including style details"),
+    style_name: Optional[str] = Form(None, description="Optional selected style name"),
     image: Optional[UploadFile] = File(None, description="Optional reference image"),
     image_url: Optional[str] = Form(None, description="Optional reference image URL"),
     notification_interval_seconds: Optional[float] = Form(None, description="Notification interval in seconds (default 10)"),
@@ -581,6 +818,7 @@ async def start_job(
         id=job_id,
         status=JobStatus.queued,
         message=message,
+        selected_style_name=style_name,
         image_path=image_path,
         notification_interval_seconds=effective_interval,
     )
@@ -598,6 +836,8 @@ async def get_job(job_id: str):
         "id": job.id,
         "status": job.status,
         "message": job.message,
+        "selected_style_name": job.selected_style_name,
+        "generated_style_name": job.generated_style_name,
         "image_path": str(job.image_path) if job.image_path else None,
         "has_result": job.result_path is not None,
         "result_path": str(job.result_path) if job.result_path else None,
@@ -605,6 +845,8 @@ async def get_job(job_id: str):
         "notification_interval_seconds": job.notification_interval_seconds,
         "result_endpoint": f"/result/{job.id}" if job.result_path else None,
         "agent_response": job.agent_response,
+        "langfuse_trace_id": job.langfuse_trace_id,
+        "langfuse_trace_url": job.langfuse_trace_url,
         "error": job.error,
     }
 
@@ -636,6 +878,9 @@ async def health():
         "default_notification_interval_seconds": DEFAULT_NOTIFICATION_INTERVAL_SECONDS,
         "real_memory_poll_seconds": REAL_MEMORY_POLL_SECONDS,
         "dry_run_sample_dir": str(SAMPLE_DRY_RUN_DIR),
+        "langfuse_tracing_enabled": LANGFUSE_TRACING_ENABLED,
+        "langfuse_configured": _langfuse_is_configured(),
+        "langfuse_base_url": os.getenv("LANGFUSE_BASE_URL", "https://cloud.langfuse.com"),
     }
 
 
@@ -651,19 +896,4 @@ if __name__ == "__main__":
         uvicorn.run(target, host=host, port=port, reload=True)
     else:
         uvicorn.run(app, host=host, port=port, reload=False)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 

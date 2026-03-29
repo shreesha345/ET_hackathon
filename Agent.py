@@ -112,13 +112,15 @@ def _load_manager_prompt() -> str:
     If the file is empty or missing, use a sensible default.
     """
     prompt_file = os.path.join(os.path.dirname(__file__), "prompt.md")
+    local_prompt = ""
     if os.path.exists(prompt_file):
         content = open(prompt_file, encoding="utf-8").read().strip()
         if content:
-            return content
+            local_prompt = content
 
     # Fallback default prompt (used only if prompt.md is empty/missing)
-    return """You are the Main Agent Manager. Your job is to oversee the complete video production pipeline.
+    if not local_prompt:
+        local_prompt = """You are the Main Agent Manager. Your job is to oversee the complete video production pipeline.
 
 ### VIDEO GENERATION WORKFLOW (ORDER OF OPERATIONS):
 1. **Scripting**: Use `scriptwriter_agent` to create `script.json`.
@@ -130,6 +132,46 @@ def _load_manager_prompt() -> str:
 5. **Final Assembly**: Use `video_editor_agent` to merge and compile the final `output.mp4`.
 
 Always check your memory for next steps and durations before proceeding to the next phase."""
+
+    # Optional: fetch manager prompt from Langfuse so prompt updates can be
+    # versioned/refined without redeploying code.
+    use_langfuse_prompt = os.getenv("LANGFUSE_USE_MANAGED_PROMPT", "0").strip() == "1"
+    if use_langfuse_prompt:
+        try:
+            from langfuse import get_client
+
+            langfuse = get_client()
+            prompt_name = os.getenv("LANGFUSE_MANAGER_PROMPT_NAME", "et-agent-manager")
+            prompt_label = os.getenv("LANGFUSE_MANAGER_PROMPT_LABEL", "production")
+            ttl_raw = os.getenv("LANGFUSE_MANAGER_PROMPT_CACHE_TTL_SECONDS", "30")
+            try:
+                cache_ttl = max(0, int(ttl_raw))
+            except ValueError:
+                cache_ttl = 30
+
+            managed_prompt = langfuse.get_prompt(
+                prompt_name,
+                label=prompt_label,
+                fallback=local_prompt,
+                cache_ttl_seconds=cache_ttl,
+            )
+
+            prompt_text = ""
+            if hasattr(managed_prompt, "compile"):
+                compiled = managed_prompt.compile()
+                if isinstance(compiled, str):
+                    prompt_text = compiled.strip()
+            if not prompt_text:
+                candidate = getattr(managed_prompt, "prompt", "")
+                if isinstance(candidate, str):
+                    prompt_text = candidate.strip()
+
+            if prompt_text:
+                return prompt_text
+        except Exception:
+            pass
+
+    return local_prompt
 
 
 # This instruction is appended to EVERY specialist's prompt so they know to hand back.

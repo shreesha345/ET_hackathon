@@ -107,11 +107,24 @@ Runtime/API keys:
 - `API_HOST`
 - `API_PORT`
 - `API_RELOAD`
+- `CORS_ALLOW_ORIGINS`
+- `CORS_ALLOW_ORIGIN_REGEX`
 
 Optional model overrides:
 - `VITE_GOOGLE_GENAI_USE_VERTEXAI`
 - `VITE_GEMINI_VOICE_MODEL_AUDIO`
 - `VITE_GEMINI_VISION_MODEL`
+
+Optional observability/prompt-management:
+- `LANGFUSE_TRACING_ENABLED`
+- `LANGFUSE_PUBLIC_KEY`
+- `LANGFUSE_SECRET_KEY`
+- `LANGFUSE_BASE_URL`
+- `LANGFUSE_TRACING_ENVIRONMENT`
+- `LANGFUSE_USE_MANAGED_PROMPT`
+- `LANGFUSE_MANAGER_PROMPT_NAME`
+- `LANGFUSE_MANAGER_PROMPT_LABEL`
+- `LANGFUSE_MANAGER_PROMPT_CACHE_TTL_SECONDS`
 
 ## Setup and Run
 
@@ -172,6 +185,25 @@ Frontend default URL: `http://localhost:5173`
 1. Open `http://localhost:5173`
 2. Submit a prompt (and optional reference image)
 3. Frontend calls API at `VITE_API_BASE_URL` (default `http://127.0.0.1:8000`)
+
+## Langfuse Setup (Tracing + Prompt Refinement)
+
+1. Create Langfuse API credentials in your Langfuse project.
+2. Set these in `.env`:
+   - `LANGFUSE_TRACING_ENABLED=1`
+   - `LANGFUSE_PUBLIC_KEY=<pk-lf-...>`
+   - `LANGFUSE_SECRET_KEY=<sk-lf-...>`
+   - `LANGFUSE_BASE_URL=https://cloud.langfuse.com` (EU) or `https://us.cloud.langfuse.com` (US)
+   - `LANGFUSE_TRACING_ENVIRONMENT=production` (or your environment name)
+3. Restart API.
+4. Run a job and open `GET /jobs/{job_id}` to get:
+   - `langfuse_trace_id`
+   - `langfuse_trace_url`
+
+Prompt refinement workflow:
+- Set `LANGFUSE_USE_MANAGED_PROMPT=1`.
+- Create a text prompt in Langfuse with name `et-agent-manager` (or your configured `LANGFUSE_MANAGER_PROMPT_NAME`) and apply label `production`.
+- Update prompt versions in Langfuse UI; the app fetches the labeled prompt at runtime (with local fallback to `prompt.md`).
 
 ## Frontend Polling Sequence
 
